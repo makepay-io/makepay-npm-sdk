@@ -723,9 +723,12 @@ export type MakePayWebhookVerificationOptions = {
   toleranceSeconds?: number;
 };
 
+export type MakePayEmbedViewType = "full" | "minimal";
+
 export type MakePayCheckoutUrlOptions = {
   baseUrl?: string;
   parentOrigin?: string;
+  viewType?: MakePayEmbedViewType;
 };
 
 export type MakePayEmbedSnippetOptions = MakePayCheckoutUrlOptions & {
@@ -759,7 +762,10 @@ type MakePayBrowserWindow = Window & {
   makepay?: {
     showPayment?: (
       paymentUid: string,
-      options?: { onEvent?: (event: MakePayCheckoutEvent) => void },
+      options?: {
+        onEvent?: (event: MakePayCheckoutEvent) => void;
+        viewType?: MakePayEmbedViewType;
+      },
     ) => void;
   };
 };
@@ -782,7 +788,7 @@ export class MakePayError extends Error {
 export class MakePayClient {
   static readonly defaultBaseUrl = "https://www.makecrypto.io";
   static readonly defaultCheckoutBaseUrl = "https://makepay.io";
-  static readonly version = "0.3.1";
+  static readonly version = "0.3.2";
 
   private readonly baseUrl: string;
   private readonly checkoutBaseUrl: string;
@@ -1532,6 +1538,7 @@ export function buildMakePayEmbeddedCheckoutUrl(
   if (options.parentOrigin) {
     url.searchParams.set("parentOrigin", options.parentOrigin);
   }
+  appendMakePayEmbedViewType(url, options.viewType);
 
   return url.toString();
 }
@@ -1550,6 +1557,7 @@ export function buildMakePayEmbeddedDonationUrl(
   if (options.parentOrigin) {
     url.searchParams.set("parentOrigin", options.parentOrigin);
   }
+  appendMakePayEmbedViewType(url, options.viewType);
 
   return url.toString();
 }
@@ -1573,7 +1581,7 @@ export function buildMakePayEmbedButtonHtml(
 
   return [
     `<script src="${escapeHtmlAttribute(buildMakePayModalScriptUrl(options))}"></script>`,
-    `<button type="button" data-makepay-payment-link="${escapeHtmlAttribute(paymentUid)}">`,
+    `<button type="button" data-makepay-payment-link="${escapeHtmlAttribute(paymentUid)}"${makePayViewTypeAttribute(options.viewType)}>`,
     `  ${escapeHtmlText(buttonLabel)}`,
     `</button>`,
   ].join("\n");
@@ -1660,7 +1668,10 @@ export async function openMakePayCheckout(
     );
   }
 
-  win.makepay.showPayment(options.paymentUid, { onEvent: options.onEvent });
+  win.makepay.showPayment(options.paymentUid, {
+    onEvent: options.onEvent,
+    viewType: options.viewType,
+  });
 }
 
 export function mountMakePayCheckout(
@@ -1675,6 +1686,7 @@ export function mountMakePayCheckout(
   iframe.src = buildMakePayEmbeddedCheckoutUrl(options.paymentUid, {
     baseUrl: options.baseUrl,
     parentOrigin: options.parentOrigin ?? globalThis.location?.origin,
+    viewType: options.viewType,
   });
   iframe.style.width = "100%";
   iframe.style.minHeight = "720px";
@@ -1823,6 +1835,31 @@ function assertNonEmpty(value: string, message: string): void {
 
 function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "");
+}
+
+function normalizeMakePayEmbedViewType(
+  viewType: MakePayEmbedViewType | undefined,
+): MakePayEmbedViewType | null {
+  return viewType === "minimal" || viewType === "full" ? viewType : null;
+}
+
+function appendMakePayEmbedViewType(
+  url: URL,
+  viewType: MakePayEmbedViewType | undefined,
+): void {
+  const normalized = normalizeMakePayEmbedViewType(viewType);
+  if (normalized) {
+    url.searchParams.set("viewType", normalized);
+  }
+}
+
+function makePayViewTypeAttribute(
+  viewType: MakePayEmbedViewType | undefined,
+): string {
+  const normalized = normalizeMakePayEmbedViewType(viewType);
+  return normalized
+    ? ` data-makepay-view-type="${escapeHtmlAttribute(normalized)}"`
+    : "";
 }
 
 function escapeHtmlAttribute(value: string): string {

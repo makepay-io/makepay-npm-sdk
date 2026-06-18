@@ -5,7 +5,7 @@ Use it to create crypto payment links, donation pages, invoices, bookkeeping
 records, subscriptions, POS terminals, products, Simple Shop storefronts,
 customer portals, branded domains, and signed webhook handlers.
 
-Public source: `https://github.com/makecryptoio/makepay-npm-sdk`
+Public source: `https://github.com/makepay-io/makepay-npm-sdk`
 
 ## Install
 
@@ -127,10 +127,12 @@ const paymentUid = response.paymentLink.uid;
 const hostedUrl = buildMakePayHostedCheckoutUrl(paymentUid);
 const embedUrl = buildMakePayEmbeddedCheckoutUrl(paymentUid, {
   parentOrigin: "https://merchant.example",
+  viewType: "minimal",
 });
 
 await openMakePayCheckout({
   paymentUid,
+  viewType: "minimal",
   onEvent(event) {
     if (event.type === "makepay.payment.redirect_requested") {
       window.location.assign(String(event.payload?.redirectUrl || hostedUrl));
@@ -141,8 +143,14 @@ await openMakePayCheckout({
 const mounted = mountMakePayCheckout({
   container: "#makepay-checkout",
   paymentUid,
+  viewType: "minimal",
 });
 ```
+
+Embedded checkout supports `viewType: "full" | "minimal"`. The default
+`"full"` view matches the hosted payment page layout. Use `"minimal"` when the
+checkout is already inside your own page or modal and should show only the
+compact payment form.
 
 Donation pages also have URL helpers:
 
@@ -150,12 +158,14 @@ Donation pages also have URL helpers:
 makepay.hostedDonationUrl("spring-campaign");
 makepay.embeddedDonationUrl("spring-campaign", {
   parentOrigin: "https://merchant.example",
+  viewType: "minimal",
 });
 ```
 
 For static CMS pages, `buildMakePayEmbedButtonHtml(paymentUid)` returns a button
 snippet that loads the MakePay modal script, and `buildMakePayIframeHtml`
-returns an iframe snippet.
+returns an iframe snippet. Pass `{ viewType: "minimal" }` to either helper to
+request the compact embed.
 
 ## Customers And Subscriptions
 
