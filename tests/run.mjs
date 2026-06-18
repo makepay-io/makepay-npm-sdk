@@ -273,14 +273,16 @@ assert.equal(
 assert.equal(
   client.embeddedCheckoutUrl("pay_123", {
     parentOrigin: "https://merchant.example",
+    viewType: "minimal",
   }),
-  "https://makepay.io/embed/payment/pay_123?parentOrigin=https%3A%2F%2Fmerchant.example",
+  "https://makepay.io/embed/payment/pay_123?parentOrigin=https%3A%2F%2Fmerchant.example&viewType=minimal",
 );
 assert.equal(
   client.embeddedDonationUrl("spring-campaign", {
     parentOrigin: "https://merchant.example",
+    viewType: "minimal",
   }),
-  "https://makepay.io/embed/donations/spring-campaign?parentOrigin=https%3A%2F%2Fmerchant.example",
+  "https://makepay.io/embed/donations/spring-campaign?parentOrigin=https%3A%2F%2Fmerchant.example&viewType=minimal",
 );
 assert.equal(client.modalScriptUrl(), "https://makepay.io/modal/makepay.js");
 assert.equal(
@@ -297,27 +299,42 @@ assert.equal(
   buildMakePayEmbeddedCheckoutUrl("pay_123", {
     baseUrl: "https://pay.example/",
     parentOrigin: "https://merchant.example",
+    viewType: "full",
   }),
-  "https://pay.example/embed/payment/pay_123?parentOrigin=https%3A%2F%2Fmerchant.example",
+  "https://pay.example/embed/payment/pay_123?parentOrigin=https%3A%2F%2Fmerchant.example&viewType=full",
 );
 assert.equal(
   buildMakePayEmbeddedDonationUrl("spring-campaign", {
     baseUrl: "https://pay.example/",
     parentOrigin: "https://merchant.example",
+    viewType: "minimal",
   }),
-  "https://pay.example/embed/donations/spring-campaign?parentOrigin=https%3A%2F%2Fmerchant.example",
+  "https://pay.example/embed/donations/spring-campaign?parentOrigin=https%3A%2F%2Fmerchant.example&viewType=minimal",
 );
 assert.equal(
   buildMakePayModalScriptUrl({ baseUrl: "https://pay.example/" }),
   "https://pay.example/modal/makepay.js",
 );
 assert.match(
-  buildMakePayEmbedButtonHtml('pay_"<&', { buttonLabel: "Pay <now>" }),
+  buildMakePayEmbedButtonHtml('pay_"<&', {
+    buttonLabel: "Pay <now>",
+    viewType: "minimal",
+  }),
   /data-makepay-payment-link="pay_&quot;&lt;&amp;"/,
 );
 assert.match(
-  buildMakePayIframeHtml("pay_123", { iframeTitle: "Secure checkout" }),
-  /src="https:\/\/makepay\.io\/embed\/payment\/pay_123"/,
+  buildMakePayEmbedButtonHtml('pay_"<&', {
+    buttonLabel: "Pay <now>",
+    viewType: "minimal",
+  }),
+  /data-makepay-view-type="minimal"/,
+);
+assert.match(
+  buildMakePayIframeHtml("pay_123", {
+    iframeTitle: "Secure checkout",
+    viewType: "minimal",
+  }),
+  /src="https:\/\/makepay\.io\/embed\/payment\/pay_123\?viewType=minimal"/,
 );
 
 const customCheckoutClient = new MakePayClient({
