@@ -385,27 +385,49 @@ export type MakePayCompanyReference = {
   [key: string]: unknown;
 };
 
-export type MakePayPaymentLink = {
-  id?: string;
-  uid?: string;
-  publicUrl?: string;
-  checkoutUrl?: string;
-  status?: string;
-  type?: string;
-  title?: string | null;
-  label?: string | null;
-  description?: string | null;
-  amount?: string | number | null;
-  fiatAmount?: string | number | null;
-  fiatCurrency?: string | null;
-  amountUsd?: string | number | null;
-  currency?: string | null;
-  asset?: string | null;
-  orderId?: string | null;
-  clientId?: string | null;
-  customerEmail?: string | null;
-  donationSlug?: string | null;
+/** The original merchant payload retained by the partner-v1 serializer. */
+export type MakePayPaymentLinkResponsePayload = {
+  amount?: string | number;
+  fiatCurrency?: string;
   metadata?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+/**
+ * Canonical authenticated partner-v1 payment-link shape. The API retains the
+ * original payload and also exposes normalized correlation fields at the link
+ * level for back-office consumers.
+ */
+export type MakePayPaymentLink = {
+  id: string;
+  uid: string;
+  publicUrl: string;
+  checkoutUrl?: string;
+  status: string;
+  type?: string;
+  donation_slug: string | null;
+  link_type: string | null;
+  source: string | null;
+  title: string | null;
+  label: string | null;
+  description: string | null;
+  amount: string | null;
+  fiatAmount: string | null;
+  fiatCurrency: string | null;
+  amountUsd?: string | number | null;
+  currency: string | null;
+  asset: string | null;
+  orderId: string | null;
+  clientId: string | null;
+  customerEmail: string | null;
+  donationSlug?: string | null;
+  metadata: Record<string, unknown>;
+  payload: MakePayPaymentLinkResponsePayload;
+  latestSession: Record<string, unknown> | null;
+  timelineEvents: unknown[];
+  created_at: string;
+  updated_at: string | null;
+  expires_at: string | null;
   createdAt?: string;
   updatedAt?: string;
   [key: string]: unknown;
@@ -413,7 +435,7 @@ export type MakePayPaymentLink = {
 
 export type MakePayPaymentLinkResponse = {
   ok?: boolean;
-  companyId?: string;
+  companyId: string;
   paymentLink: MakePayPaymentLink;
   paymentRequestEmailSent?: boolean;
   paymentRequestEmailError?: string | null;
@@ -421,8 +443,59 @@ export type MakePayPaymentLinkResponse = {
 };
 
 export type MakePayPaymentLinksResponse = {
-  companyId?: string;
+  companyId: string;
   paymentLinks: MakePayPaymentLink[];
+  [key: string]: unknown;
+};
+
+export type MakePayDonationLinksResponse = {
+  companyId: string;
+  donations: MakePayPaymentLink[];
+  [key: string]: unknown;
+};
+
+export type MakePayPaymentRequestEmailResponse = {
+  ok: boolean;
+  email: string;
+  paymentLink: {
+    id: string;
+    uid: string;
+    donation_slug: string | null;
+    link_type: string;
+    status: string;
+    payload: MakePayPaymentLinkResponsePayload;
+    publicUrl: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+};
+
+export type MakePayAnonymousPaymentLinkResponse = {
+  ok: boolean;
+  anonymous: true;
+  paymentRequestEmailSent: false;
+  paymentRequestEmailError: null;
+  paymentLink: {
+    id: string;
+    uid: string;
+    status: string;
+    link_type: "one_time";
+    payload: MakePayPaymentLinkResponsePayload;
+    settlement: Record<string, unknown>;
+    branding: Record<string, unknown>;
+    publicUrl: string;
+    expiresAt: string | null;
+    expires_at: string | null;
+    created_at: string;
+    updated_at: string;
+    webhook: {
+      url: string;
+      secret: string;
+      secretLast4: string;
+    } | null;
+    [key: string]: unknown;
+  };
+  requestId: string;
   [key: string]: unknown;
 };
 
@@ -841,6 +914,11 @@ export type MakePayIdempotencyOptions = {
   idempotencyKey?: string;
 };
 
+export type MakePayRequiredIdempotencyOptions = {
+  /** 8-200 URL-safe characters; reuse only for an identical mutation. */
+  idempotencyKey: string;
+};
+
 export type CreatePaymentLinkOptions = MakePayIdempotencyOptions & {
   status?: "active" | "paused" | "archived";
   sendPaymentRequestEmail?: boolean;
@@ -1035,7 +1113,7 @@ export class MakePayClient {
   sendPaymentRequestEmail(
     uid: string,
     email?: string,
-  ): Promise<MakePayPaymentLinkResponse> {
+  ): Promise<MakePayPaymentRequestEmailResponse> {
     assertNonEmpty(uid, "Payment link UID is required.");
 
     return this.request(
@@ -1063,7 +1141,7 @@ export class MakePayClient {
     );
   }
 
-  listDonationLinks(): Promise<MakePayPaymentLinksResponse> {
+  listDonationLinks(): Promise<MakePayDonationLinksResponse> {
     return this.request("GET", "/api/partner/v1/makepay/donations");
   }
 
@@ -1152,7 +1230,7 @@ export class MakePayClient {
 
   upsertCurrentWebhookSubscription(
     payload: MakePayWebhookSubscriptionPayload,
-    options: MakePayIdempotencyOptions = {},
+    options: MakePayRequiredIdempotencyOptions,
   ): Promise<MakePayWebhookSubscriptionResponse> {
     assertNonEmpty(payload.url, "Webhook subscription URL is required.");
 
@@ -1165,7 +1243,7 @@ export class MakePayClient {
   }
 
   deleteCurrentWebhookSubscription(
-    options: MakePayIdempotencyOptions = {},
+    options: MakePayRequiredIdempotencyOptions,
   ): Promise<MakePayWebhookSubscriptionResponse> {
     return this.request(
       "DELETE",
@@ -1774,7 +1852,7 @@ export class MakePayClient {
 export async function createAnonymousPaymentLink(
   payload: MakePayAnonymousPaymentLinkPayload,
   options: MakePayPublicRequestOptions = {},
-): Promise<MakePayPaymentLinkResponse> {
+): Promise<MakePayAnonymousPaymentLinkResponse> {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   if (!fetchImpl) {
     throw new MakePayError("A fetch implementation is required.");
@@ -1795,7 +1873,9 @@ export async function createAnonymousPaymentLink(
     redirect: "manual",
   });
 
-  return decodeMakePayResponse(response) as Promise<MakePayPaymentLinkResponse>;
+  return decodeMakePayResponse(
+    response,
+  ) as Promise<MakePayAnonymousPaymentLinkResponse>;
 }
 
 export const createAnonymousMakePayPaymentLink = createAnonymousPaymentLink;

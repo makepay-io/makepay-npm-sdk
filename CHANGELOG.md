@@ -26,6 +26,9 @@ All notable changes to `@makecrypto/makepay` are documented here.
 - The default hosted checkout and embedded checkout URLs use the canonical
   `www.makepay.io` origin; the production modal loader uses the MakePay CDN.
 - Published JavaScript and declarations no longer include source maps.
+- Authenticated payment-link detail, update, and list response types now match
+  the partner-v1 envelope and retain the typed nested payment-link payload.
+- Packaging always rebuilds through `prepack` before npm creates an artifact.
 
 ### Compatibility
 

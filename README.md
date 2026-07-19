@@ -408,7 +408,8 @@ await makepay.listWebhookRequests({ limit: 25 });
 
 OAuth integrations should use a grant-scoped webhook subscription rather than
 changing a company-global callback URL. The signing secret is returned only on
-creation or explicit rotation, so persist it immediately.
+creation or explicit rotation, so persist it immediately. PUT and DELETE
+require an idempotency key.
 
 ```ts
 const created = await makepay.upsertCurrentWebhookSubscription(
@@ -420,7 +421,9 @@ const created = await makepay.upsertCurrentWebhookSubscription(
 );
 
 await makepay.getCurrentWebhookSubscription();
-await makepay.deleteCurrentWebhookSubscription();
+await makepay.deleteCurrentWebhookSubscription({
+  idempotencyKey: "installation_123:webhook-delete:v1",
+});
 ```
 
 ## Webhook Verification
@@ -474,11 +477,14 @@ secondary SDK package.
 
 ```ts
 import type {
+  MakePayAnonymousPaymentLinkResponse,
   MakePayBookkeepingInvoicePayload,
   MakePayBookkeepingSummaryResponse,
   MakePayAuthProvider,
+  MakePayDonationLinksResponse,
   MakePayPaymentLinkPayload,
   MakePayPaymentLinkResponse,
+  MakePayPaymentRequestEmailResponse,
   MakePayWebhookSubscriptionResponse,
 } from "@makecrypto/makepay";
 ```
@@ -493,6 +499,10 @@ Model conventions:
   use `YYYY-MM-DD`.
 - IDs are usually public `uid` values. Bookkeeping detail endpoints accept an
   internal UUID or public UID.
+- Authenticated partner-v1 payment links retain the original values under
+  `paymentLink.payload` and also expose normalized `amount`, `fiatCurrency`,
+  `metadata`, correlation fields, latest session, and timeline fields directly
+  on `paymentLink`.
 - API methods throw `MakePayError` for non-2xx responses. Successful responses
   are typed envelopes with index signatures, so production can add fields
   without breaking TypeScript consumers.
@@ -521,9 +531,11 @@ Model conventions:
 
 | Functions                                                                                                                | Resolves to                                                                              | Key fields                                                                                                  |
 | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `createPaymentLink`, `getPaymentLink`, `updatePaymentLink`, `sendPaymentRequestEmail`, donation variants                 | `MakePayPaymentLinkResponse`                                                             | `ok`, `companyId`, `paymentLink`, `paymentRequestEmailSent`, `paymentRequestEmailError`                     |
-| `listPaymentLinks`, `listDonationLinks`                                                                                  | `MakePayPaymentLinksResponse`                                                            | `companyId`, `paymentLinks`                                                                                 |
-| `createAnonymousPaymentLink`                                                                                             | `MakePayPaymentLinkResponse`                                                             | `paymentLink`, plus public-link metadata returned by the API                                                |
+| `createPaymentLink`, `getPaymentLink`, `updatePaymentLink`, donation create/detail/update                                | `MakePayPaymentLinkResponse`                                                             | required `companyId`; normalized `paymentLink` plus retained `paymentLink.payload`                           |
+| `listPaymentLinks`                                                                                                       | `MakePayPaymentLinksResponse`                                                            | required `companyId`; `paymentLinks[]` uses the same canonical partner-v1 link shape                        |
+| `listDonationLinks`                                                                                                      | `MakePayDonationLinksResponse`                                                           | required `companyId`, `donations`                                                                           |
+| `sendPaymentRequestEmail`                                                                                                | `MakePayPaymentRequestEmailResponse`                                                     | `ok`, `email`, and the updated payment-link email payload                                                   |
+| `createAnonymousPaymentLink`                                                                                             | `MakePayAnonymousPaymentLinkResponse`                                                    | `anonymous`, `requestId`, public `paymentLink`, and optional one-time webhook secret                        |
 | `listCustomers`, `upsertCustomer`, `createCustomerPortal`                                                                | `MakePayCustomersResponse` or `MakePayCustomerResponse`                                  | `customers`, `customer`, `portalUrl` or `url`                                                               |
 | `listSubscriptions`, `createSubscription`                                                                                | `MakePaySubscriptionsResponse` or `MakePaySubscriptionResponse`                          | `subscriptions`, `subscription`                                                                             |
 | `listPosTerminals`, `createPosTerminal`, `getPosTerminal`, `updatePosTerminal`                                           | `MakePayPosTerminalsResponse` or `MakePayPosTerminalResponse`                            | `terminals`/`posTerminals`, `terminal`/`posTerminal`                                                        |

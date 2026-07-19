@@ -93,12 +93,6 @@ await client.createSubscription({
 });
 await client.listDestinationAssets();
 await client.listWebhookRequests({ limit: 10 });
-await client.getCurrentWebhookSubscription();
-await client.upsertCurrentWebhookSubscription(
-  { url: "https://merchant.example/webhooks/makepay" },
-  { idempotencyKey: "installation_123:webhook:v1" },
-);
-await client.deleteCurrentWebhookSubscription();
 await client.listPosTerminals();
 await client.createPosTerminal({ name: "Front counter", pin: "1234" });
 await client.getPosTerminal("pos_123");
@@ -177,7 +171,7 @@ await client.createBookkeepingReconciliation({
 });
 
 assert.equal(response.ok, true);
-assert.equal(requests.length, 57);
+assert.equal(requests.length, 54);
 assert.match(requests[0].url, /\/api\/partner\/v1\/makepay\/payment-links$/);
 assert.equal(requests[0].init.method, "POST");
 assert.equal(requests[0].init.redirect, "manual");
@@ -219,32 +213,6 @@ assert.ok(
 assert.ok(
   requestRoutes.includes(
     "GET /api/partner/v1/makepay/webhook-requests?limit=10",
-  ),
-);
-assert.ok(
-  requestRoutes.includes(
-    "GET /api/partner/v1/makepay/webhook-subscriptions/current",
-  ),
-);
-assert.ok(
-  requestRoutes.includes(
-    "PUT /api/partner/v1/makepay/webhook-subscriptions/current",
-  ),
-);
-const webhookSubscriptionPut = requests.find((request) => {
-  const url = new URL(request.url);
-  return (
-    request.init.method === "PUT" &&
-    url.pathname === "/api/partner/v1/makepay/webhook-subscriptions/current"
-  );
-});
-assert.equal(
-  webhookSubscriptionPut?.init.headers.get("idempotency-key"),
-  "installation_123:webhook:v1",
-);
-assert.ok(
-  requestRoutes.includes(
-    "DELETE /api/partner/v1/makepay/webhook-subscriptions/current",
   ),
 );
 assert.ok(requestRoutes.includes("POST /api/partner/v1/makepay/pos-terminals"));
@@ -337,6 +305,111 @@ const documentUploadRequest = requests.find((request) => {
 assert.ok(documentUploadRequest);
 assert.equal(documentUploadRequest.init.body instanceof FormData, true);
 assert.equal(documentUploadRequest.init.headers.has("content-type"), false);
+
+const canonicalPayload = {
+  amount: "12.50",
+  fiatCurrency: "USD",
+  metadata: {
+    medusaOrderId: "order_123",
+    source: "medusa",
+  },
+  title: "Order #123",
+};
+const canonicalPaymentLink = {
+  id: "4d2a248a-4636-4c98-8c68-87db803a2f7e",
+  uid: "pay_contract",
+  donation_slug: null,
+  link_type: "one_time",
+  source: "api",
+  publicUrl: "https://www.makepay.io/payment/pay_contract",
+  status: "active",
+  amount: "12.50",
+  fiatAmount: "12.50",
+  fiatCurrency: "USD",
+  currency: "USDT",
+  asset: "ETH.USDT-0xcontract",
+  title: "Order #123",
+  label: "Order #123",
+  description: null,
+  orderId: "order_123",
+  customerEmail: null,
+  clientId: null,
+  metadata: canonicalPayload.metadata,
+  payload: canonicalPayload,
+  latestSession: { id: "session_123", status: "pending" },
+  timelineEvents: [{ type: "payment_link_created" }],
+  created_at: "2026-07-19T10:00:00.000Z",
+  updated_at: "2026-07-19T10:01:00.000Z",
+  expires_at: "2026-07-20T10:00:00.000Z",
+};
+const partnerContractRequests = [];
+const partnerContractClient = new MakePayClient({
+  keyId: "mk_contract",
+  keySecret: "mksec_contract",
+  fetch: async (url, init) => {
+    const parsedUrl = new URL(String(url));
+    partnerContractRequests.push({ init, url: parsedUrl });
+    const isList = parsedUrl.pathname.endsWith("/payment-links");
+    return new Response(
+      JSON.stringify(
+        isList
+          ? {
+              companyId: "company_contract",
+              paymentLinks: [canonicalPaymentLink],
+            }
+          : {
+              ...(init.method === "PATCH" ? { ok: true } : {}),
+              companyId: "company_contract",
+              paymentLink: canonicalPaymentLink,
+            },
+      ),
+      { headers: { "content-type": "application/json" }, status: 200 },
+    );
+  },
+});
+
+const contractList = await partnerContractClient.listPaymentLinks();
+const contractDetail = await partnerContractClient.getPaymentLink(
+  "pay_contract",
+);
+const contractUpdate = await partnerContractClient.updatePaymentLink(
+  "pay_contract",
+  { status: "paused" },
+  { idempotencyKey: "order_123:update:v1" },
+);
+
+assert.equal(contractList.companyId, "company_contract");
+assert.equal(contractDetail.companyId, "company_contract");
+assert.equal(contractUpdate.companyId, "company_contract");
+assert.equal(contractUpdate.ok, true);
+for (const paymentLink of [
+  contractList.paymentLinks[0],
+  contractDetail.paymentLink,
+  contractUpdate.paymentLink,
+]) {
+  assert.equal(paymentLink.payload.amount, "12.50");
+  assert.equal(paymentLink.payload.fiatCurrency, "USD");
+  assert.deepEqual(paymentLink.payload.metadata, canonicalPayload.metadata);
+  assert.equal(paymentLink.amount, paymentLink.payload.amount);
+  assert.equal(paymentLink.fiatCurrency, paymentLink.payload.fiatCurrency);
+  assert.deepEqual(paymentLink.metadata, paymentLink.payload.metadata);
+  assert.equal(paymentLink.latestSession.id, "session_123");
+  assert.equal(paymentLink.timelineEvents.length, 1);
+}
+assert.deepEqual(
+  partnerContractRequests.map(
+    ({ init, url }) => `${init.method} ${url.pathname}`,
+  ),
+  [
+    "GET /api/partner/v1/makepay/payment-links",
+    "GET /api/partner/v1/makepay/payment-links/pay_contract",
+    "PATCH /api/partner/v1/makepay/payment-links/pay_contract",
+  ],
+);
+assert.equal(
+  partnerContractRequests[2].init.headers.get("idempotency-key"),
+  "order_123:update:v1",
+);
 assert.equal(
   client.hostedCheckoutUrl("pay_123"),
   "https://www.makepay.io/payment/pay_123",
@@ -442,14 +515,47 @@ const anonymousResponse = await createAnonymousPaymentLink(
   {
     fetch: async (url, init) => {
       anonymousRequest = { init, url: String(url) };
-      return new Response(JSON.stringify({ ok: true, anonymous: true }), {
-        headers: { "content-type": "application/json" },
-        status: 201,
-      });
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          anonymous: true,
+          paymentRequestEmailSent: false,
+          paymentRequestEmailError: null,
+          paymentLink: {
+            id: "anonymous-link-id",
+            uid: "anonymous-link-uid",
+            status: "active",
+            link_type: "one_time",
+            payload: { amount: "5", fiatCurrency: "USD" },
+            settlement: {
+              currency: "USDT",
+              priorities: [
+                { chain: "ETH", address: "0xabc", asset: "ETH.USDT-0xabc" },
+              ],
+            },
+            branding: {},
+            publicUrl:
+              "https://www.makepay.io/payment/anonymous-link-uid",
+            expiresAt: "2026-07-20T10:00:00.000Z",
+            expires_at: "2026-07-20T10:00:00.000Z",
+            created_at: "2026-07-19T10:00:00.000Z",
+            updated_at: "2026-07-19T10:00:00.000Z",
+            webhook: null,
+          },
+          requestId: "anonymous-request-id",
+        }),
+        {
+          headers: { "content-type": "application/json" },
+          status: 201,
+        },
+      );
     },
   },
 );
 assert.equal(anonymousResponse.anonymous, true);
+assert.equal(anonymousResponse.requestId, "anonymous-request-id");
+assert.equal(anonymousResponse.paymentLink.payload.amount, "5");
+assert.equal(anonymousResponse.paymentLink.webhook, null);
 assert.match(
   anonymousRequest.url,
   /\/api\/partner\/v1\/makepay\/payment-links$/,
@@ -548,13 +654,21 @@ const oauthClient = new MakePayClient({
     }
 
     return new Response(
-      JSON.stringify({ ok: true, paymentLink: { uid: "pay_oauth" } }),
+      JSON.stringify({
+        companyId: "company_oauth",
+        paymentLink: {
+          ...canonicalPaymentLink,
+          uid: "pay_oauth",
+        },
+      }),
       { headers: { "content-type": "application/json" }, status: 200 },
     );
   },
 });
 const oauthResponse = await oauthClient.getPaymentLink("pay_oauth");
 assert.equal(oauthResponse.paymentLink.uid, "pay_oauth");
+assert.equal(oauthResponse.companyId, "company_oauth");
+assert.equal(oauthResponse.paymentLink.payload.amount, "12.50");
 assert.equal(oauthRequests.length, 2);
 assert.equal(authRequests.length, 2);
 assert.deepEqual(
@@ -577,6 +691,127 @@ assert.notEqual(
   oauthRequests[1].init.headers.get("dpop"),
 );
 assert.equal(oauthRequests[0].init.headers.get("x-makecrypto-key-id"), null);
+
+const webhookSubscription = {
+  id: "7f74e4ca-014e-4cf7-a17a-f8ef6f2eabf2",
+  oauthGrantId: "01c3075c-35f2-4afb-8461-603fb6b7f489",
+  companyId: "company_oauth",
+  url: "https://merchant.example/webhooks/makepay",
+  events: ["makepay.payment.*"],
+  active: true,
+  status: "active",
+  description: "Medusa store",
+  metadata: { integration: "medusa" },
+  secretLast4: "d1f0",
+  secretCreatedAt: "2026-07-19T10:00:00.000Z",
+  secretUpdatedAt: "2026-07-19T10:00:00.000Z",
+  createdAt: "2026-07-19T10:00:00.000Z",
+  updatedAt: "2026-07-19T10:00:00.000Z",
+};
+const webhookSubscriptionRequests = [];
+const webhookSubscriptionClient = new MakePayClient({
+  authProvider: {
+    async getAuthorization(request) {
+      const accessToken = "webhook_access";
+      return {
+        accessToken,
+        tokenType: "DPoP",
+        dpopProof: createMakePayDpopProof({
+          accessToken,
+          method: request.method,
+          privateKey: dpopKeyPair.privateKeyPem,
+          url: request.url,
+        }),
+      };
+    },
+  },
+  fetch: async (url, init) => {
+    webhookSubscriptionRequests.push({ init, url: String(url) });
+    const responseSubscription =
+      init.method === "DELETE"
+        ? {
+            ...webhookSubscription,
+            active: false,
+            status: "disabled",
+            secretLast4: null,
+          }
+        : webhookSubscription;
+    return new Response(
+      JSON.stringify({
+        ...(init.method === "PUT"
+          ? {
+              ok: true,
+              created: true,
+              rotated: false,
+              signingSecret: "mkwhsec_test_once",
+            }
+          : init.method === "DELETE"
+            ? { ok: true }
+            : {}),
+        companyId: "company_oauth",
+        subscription: responseSubscription,
+      }),
+      { headers: { "content-type": "application/json" }, status: 200 },
+    );
+  },
+});
+
+const currentWebhookSubscription =
+  await webhookSubscriptionClient.getCurrentWebhookSubscription();
+const createdWebhookSubscription =
+  await webhookSubscriptionClient.upsertCurrentWebhookSubscription(
+    {
+      url: webhookSubscription.url,
+      events: ["makepay.payment.*"],
+      metadata: { integration: "medusa" },
+    },
+    { idempotencyKey: "installation_123:webhook:v1" },
+  );
+const deletedWebhookSubscription =
+  await webhookSubscriptionClient.deleteCurrentWebhookSubscription({
+    idempotencyKey: "installation_123:webhook-delete:v1",
+  });
+
+assert.equal(currentWebhookSubscription.companyId, "company_oauth");
+assert.equal(
+  currentWebhookSubscription.subscription?.url,
+  webhookSubscription.url,
+);
+assert.equal(currentWebhookSubscription.signingSecret, undefined);
+assert.equal(createdWebhookSubscription.created, true);
+assert.equal(createdWebhookSubscription.signingSecret, "mkwhsec_test_once");
+assert.equal(deletedWebhookSubscription.subscription?.status, "disabled");
+assert.equal(deletedWebhookSubscription.signingSecret, undefined);
+assert.deepEqual(
+  webhookSubscriptionRequests.map((request) => {
+    const url = new URL(request.url);
+    return `${request.init.method} ${url.pathname}`;
+  }),
+  [
+    "GET /api/partner/v1/makepay/webhook-subscriptions/current",
+    "PUT /api/partner/v1/makepay/webhook-subscriptions/current",
+    "DELETE /api/partner/v1/makepay/webhook-subscriptions/current",
+  ],
+);
+for (const request of webhookSubscriptionRequests) {
+  assert.equal(request.init.headers.get("authorization"), "DPoP webhook_access");
+  assert.ok(request.init.headers.get("dpop"));
+  assert.equal(request.init.headers.get("x-makecrypto-key-id"), null);
+  assert.equal(request.init.redirect, "manual");
+}
+assert.equal(
+  webhookSubscriptionRequests[1].init.headers.get("idempotency-key"),
+  "installation_123:webhook:v1",
+);
+assert.equal(
+  webhookSubscriptionRequests[2].init.headers.get("idempotency-key"),
+  "installation_123:webhook-delete:v1",
+);
+assert.deepEqual(JSON.parse(webhookSubscriptionRequests[1].init.body), {
+  url: webhookSubscription.url,
+  events: ["makepay.payment.*"],
+  metadata: { integration: "medusa" },
+});
 
 let persistentUnauthorizedRequests = 0;
 let persistentRefreshCalls = 0;

@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(
@@ -169,8 +169,22 @@ try {
     }
   }
 
+  const exported = await import(
+    `${pathToFileURL(join(extractedRoot, "dist/index.js")).href}?verify=${Date.now()}`
+  );
+  for (const exportName of [
+    "MakePayClient",
+    "createAnonymousPaymentLink",
+    "createMakePayDpopProof",
+    "generateMakePayDpopKeyPair",
+  ]) {
+    if (typeof exported[exportName] !== "function") {
+      fail(`Packed tarball is missing working export ${exportName}.`);
+    }
+  }
+
   console.log(
-    `Verified ${packageJson.name}@${packageJson.version}: exact artifact allowlist, no source maps, and no recognized secrets.`,
+    `Verified ${packageJson.name}@${packageJson.version}: exact artifact allowlist, working runtime exports, no source maps, and no recognized secrets.`,
   );
 } finally {
   if (tarballPath) rmSync(tarballPath, { force: true });
