@@ -28,6 +28,8 @@ All notable changes to `@makecrypto/makepay` are documented here.
   URLs remain origin-only.
 - Embedded-checkout parent origins are normalized and validated before they are
   serialized or used for browser message targeting.
+- Mounted checkout events must come from both the configured MakePay origin and
+  that mount's iframe window, isolating sibling checkout frames.
 - Webhook verification rejects non-finite or non-positive timestamp tolerances
   instead of allowing them to disable freshness checks.
 - The default hosted checkout and embedded checkout URLs use the canonical

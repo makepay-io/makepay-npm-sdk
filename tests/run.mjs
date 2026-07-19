@@ -1110,7 +1110,9 @@ const browserGlobalDescriptors = Object.fromEntries(
     Object.getOwnPropertyDescriptor(globalThis, name),
   ]),
 );
+const mountedFrameWindow = {};
 const mountedIframe = {
+  contentWindow: mountedFrameWindow,
   removed: false,
   remove() {
     this.removed = true;
@@ -1119,6 +1121,8 @@ const mountedIframe = {
   style: {},
 };
 let appendedIframe;
+let messageListener;
+let removedMessageListener;
 Object.defineProperty(globalThis, "document", {
   configurable: true,
   value: {
@@ -1131,8 +1135,14 @@ Object.defineProperty(globalThis, "document", {
 Object.defineProperty(globalThis, "window", {
   configurable: true,
   value: {
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(type, listener) {
+      assert.equal(type, "message");
+      messageListener = listener;
+    },
+    removeEventListener(type, listener) {
+      assert.equal(type, "message");
+      removedMessageListener = listener;
+    },
   },
 });
 Object.defineProperty(globalThis, "location", {
@@ -1145,8 +1155,12 @@ try {
       appendedIframe = iframe;
     },
   };
+  const checkoutEvents = [];
   const mounted = mountMakePayCheckout({
     container,
+    onEvent(event) {
+      checkoutEvents.push(event);
+    },
     paymentUid: "pay_parent_origin",
   });
   assert.equal(appendedIframe, mountedIframe);
@@ -1154,8 +1168,30 @@ try {
     mounted.iframe.src,
     "https://www.makepay.io/embed/payment/pay_parent_origin?parentOrigin=http%3A%2F%2Flocalhost%3A4312",
   );
+  assert.equal(typeof messageListener, "function");
+  const acceptedCheckoutEvent = {
+    payload: { status: "complete" },
+    type: "makepay.payment.completed",
+  };
+  messageListener({
+    data: acceptedCheckoutEvent,
+    origin: "https://www.makepay.io",
+    source: mountedFrameWindow,
+  });
+  messageListener({
+    data: { type: "makepay.payment.sibling" },
+    origin: "https://www.makepay.io",
+    source: {},
+  });
+  messageListener({
+    data: { type: "makepay.payment.null_source" },
+    origin: "https://www.makepay.io",
+    source: null,
+  });
+  assert.deepEqual(checkoutEvents, [acceptedCheckoutEvent]);
   mounted.unmount();
   assert.equal(mountedIframe.removed, true);
+  assert.equal(removedMessageListener, messageListener);
 
   Object.defineProperty(globalThis, "location", {
     configurable: true,

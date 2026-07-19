@@ -2211,6 +2211,8 @@ export function mountMakePayCheckout(
   const handleMessage = (event: MessageEvent<MakePayCheckoutEvent>) => {
     if (
       event.origin !== allowedOrigin ||
+      !iframe.contentWindow ||
+      event.source !== iframe.contentWindow ||
       !event.data ||
       typeof event.data.type !== "string"
     ) {

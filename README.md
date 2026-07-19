@@ -222,7 +222,8 @@ const mounted = mountMakePayCheckout({
 Embedded checkout supports `viewType: "full" | "minimal"`. The default
 `"full"` view matches the hosted payment page layout. Use `"minimal"` when the
 checkout is already inside your own page or modal and should show only the
-compact payment form.
+compact payment form. The mounted helper accepts checkout events only when both
+the configured MakePay origin and the mounted iframe window match.
 
 Donation pages also have URL helpers:
 
