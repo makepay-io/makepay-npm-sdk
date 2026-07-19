@@ -10,7 +10,9 @@ import {
 } from "node:crypto";
 
 export type MakePayClientBaseOptions = {
+  /** Origin-only HTTPS URL; exact loopback hosts may use HTTP for local tests. */
   baseUrl?: string;
+  /** Origin-only HTTPS URL; exact loopback hosts may use HTTP for local tests. */
   checkoutBaseUrl?: string;
   fetch?: typeof fetch;
 };
@@ -905,6 +907,7 @@ export type MakePayBookkeepingDocumentDownloadResponse = {
 };
 
 export type MakePayPublicRequestOptions = {
+  /** Origin-only HTTPS URL; exact loopback hosts may use HTTP for local tests. */
   baseUrl?: string;
   fetch?: typeof fetch;
 };
@@ -953,13 +956,16 @@ export type MakePayRequestOptions = MakePayIdempotencyOptions & {
 };
 
 export type MakePayWebhookVerificationOptions = {
+  /** Finite positive freshness window in seconds. Defaults to 300. */
   toleranceSeconds?: number;
 };
 
 export type MakePayEmbedViewType = "full" | "minimal";
 
 export type MakePayCheckoutUrlOptions = {
+  /** Origin-only HTTPS URL; exact loopback hosts may use HTTP for local tests. */
   baseUrl?: string;
+  /** Embedding merchant origin; follows the same HTTPS/loopback policy. */
   parentOrigin?: string;
   viewType?: MakePayEmbedViewType;
 };
@@ -1035,11 +1041,12 @@ export class MakePayClient {
     const parsedBaseUrl = parseMakePayApiBaseUrl(
       options.baseUrl ?? MakePayClient.defaultBaseUrl,
     );
-    this.baseUrl = parsedBaseUrl.toString().replace(/\/+$/, "");
+    const parsedCheckoutBaseUrl = parseMakePayCheckoutBaseUrl(
+      options.checkoutBaseUrl ?? MakePayClient.defaultCheckoutBaseUrl,
+    );
+    this.baseUrl = parsedBaseUrl.origin;
     this.baseOrigin = parsedBaseUrl.origin;
-    this.checkoutBaseUrl = (
-      options.checkoutBaseUrl ?? MakePayClient.defaultCheckoutBaseUrl
-    ).replace(/\/+$/, "");
+    this.checkoutBaseUrl = parsedCheckoutBaseUrl.origin;
     this.keyId = options.keyId;
     this.keySecret = options.keySecret;
     this.authProvider = options.authProvider;
@@ -1858,9 +1865,12 @@ export async function createAnonymousPaymentLink(
     throw new MakePayError("A fetch implementation is required.");
   }
 
+  const baseUrl = parseMakePayApiBaseUrl(
+    options.baseUrl ?? MakePayClient.defaultBaseUrl,
+  );
   const url = new URL(
     "/api/partner/v1/makepay/payment-links",
-    `${normalizeBaseUrl(options.baseUrl ?? MakePayClient.defaultBaseUrl)}/`,
+    `${baseUrl.origin}/`,
   );
   const headers = new Headers({
     accept: "application/json",
@@ -1927,13 +1937,9 @@ export function createMakePayDpopProof(
   } catch {
     throw new MakePayError("DPoP URL must be an absolute URL.");
   }
-  if (
-    (url.protocol !== "https:" && url.protocol !== "http:") ||
-    url.username ||
-    url.password
-  ) {
+  if (!isMakePaySecureTransportUrl(options.url, url)) {
     throw new MakePayError(
-      "DPoP URL must be an HTTP URL without embedded credentials.",
+      "DPoP URL must be an HTTPS URL without embedded credentials; HTTP is allowed only for exact loopback hosts localhost, 127.0.0.1, or [::1].",
     );
   }
   // RFC 9449 section 4.2 defines `htu` without query and fragment parts.
@@ -1983,9 +1989,12 @@ export function buildMakePayHostedCheckoutUrl(
 ): string {
   assertNonEmpty(paymentUid, "Payment link UID is required.");
 
+  const baseUrl = parseMakePayCheckoutBaseUrl(
+    options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl,
+  );
   return new URL(
     `/payment/${encodeURIComponent(paymentUid)}`,
-    `${normalizeBaseUrl(options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl)}/`,
+    `${baseUrl.origin}/`,
   ).toString();
 }
 
@@ -1995,9 +2004,12 @@ export function buildMakePayHostedDonationUrl(
 ): string {
   assertNonEmpty(donationSlug, "Donation slug is required.");
 
+  const baseUrl = parseMakePayCheckoutBaseUrl(
+    options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl,
+  );
   return new URL(
     `/donations/${encodeURIComponent(donationSlug)}`,
-    `${normalizeBaseUrl(options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl)}/`,
+    `${baseUrl.origin}/`,
   ).toString();
 }
 
@@ -2007,13 +2019,19 @@ export function buildMakePayEmbeddedCheckoutUrl(
 ): string {
   assertNonEmpty(paymentUid, "Payment link UID is required.");
 
+  const baseUrl = parseMakePayCheckoutBaseUrl(
+    options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl,
+  );
   const url = new URL(
     `/embed/payment/${encodeURIComponent(paymentUid)}`,
-    `${normalizeBaseUrl(options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl)}/`,
+    `${baseUrl.origin}/`,
   );
 
-  if (options.parentOrigin) {
-    url.searchParams.set("parentOrigin", options.parentOrigin);
+  if (options.parentOrigin !== undefined) {
+    url.searchParams.set(
+      "parentOrigin",
+      parseMakePayParentOrigin(options.parentOrigin).origin,
+    );
   }
   appendMakePayEmbedViewType(url, options.viewType);
 
@@ -2026,13 +2044,19 @@ export function buildMakePayEmbeddedDonationUrl(
 ): string {
   assertNonEmpty(donationSlug, "Donation slug is required.");
 
+  const baseUrl = parseMakePayCheckoutBaseUrl(
+    options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl,
+  );
   const url = new URL(
     `/embed/donations/${encodeURIComponent(donationSlug)}`,
-    `${normalizeBaseUrl(options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl)}/`,
+    `${baseUrl.origin}/`,
   );
 
-  if (options.parentOrigin) {
-    url.searchParams.set("parentOrigin", options.parentOrigin);
+  if (options.parentOrigin !== undefined) {
+    url.searchParams.set(
+      "parentOrigin",
+      parseMakePayParentOrigin(options.parentOrigin).origin,
+    );
   }
   appendMakePayEmbedViewType(url, options.viewType);
 
@@ -2042,17 +2066,18 @@ export function buildMakePayEmbeddedDonationUrl(
 export function buildMakePayModalScriptUrl(
   options: Pick<MakePayCheckoutUrlOptions, "baseUrl"> = {},
 ): string {
-  const baseUrl = options.baseUrl ? normalizeBaseUrl(options.baseUrl) : null;
+  const baseUrl = parseMakePayCheckoutBaseUrl(
+    options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl,
+  );
 
   if (
-    !baseUrl ||
-    baseUrl === normalizeBaseUrl(MakePayClient.defaultCheckoutBaseUrl) ||
-    baseUrl === "https://makepay.io"
+    baseUrl.origin === MakePayClient.defaultCheckoutBaseUrl ||
+    baseUrl.origin === "https://makepay.io"
   ) {
     return MAKEPAY_MODAL_SCRIPT_CDN_URL;
   }
 
-  return new URL("/modal/makepay.min.js", `${baseUrl}/`).toString();
+  return new URL("/modal/makepay.min.js", `${baseUrl.origin}/`).toString();
 }
 
 export function buildMakePayEmbedButtonHtml(
@@ -2161,15 +2186,20 @@ export async function openMakePayCheckout(
 export function mountMakePayCheckout(
   options: MountMakePayCheckoutOptions,
 ): MountedMakePayCheckout {
+  const parentOrigin = options.parentOrigin ?? globalThis.location?.origin;
+  const normalizedParentOrigin =
+    parentOrigin === undefined
+      ? undefined
+      : parseMakePayParentOrigin(parentOrigin).origin;
   const container = resolveContainer(options.container);
-  const allowedOrigin = new URL(
-    normalizeBaseUrl(options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl),
+  const allowedOrigin = parseMakePayCheckoutBaseUrl(
+    options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl,
   ).origin;
   const iframe = document.createElement("iframe");
   iframe.title = options.iframeTitle ?? "MakePay checkout";
   iframe.src = buildMakePayEmbeddedCheckoutUrl(options.paymentUid, {
     baseUrl: options.baseUrl,
-    parentOrigin: options.parentOrigin ?? globalThis.location?.origin,
+    parentOrigin: normalizedParentOrigin,
     viewType: options.viewType,
   });
   iframe.style.width = "100%";
@@ -2225,7 +2255,8 @@ export function verifyMakePayWebhook(
 
   const toleranceSeconds = options.toleranceSeconds ?? 300;
   if (
-    toleranceSeconds > 0 &&
+    !Number.isFinite(toleranceSeconds) ||
+    toleranceSeconds <= 0 ||
     Math.abs(Math.floor(Date.now() / 1000) - timestamp) > toleranceSeconds
   ) {
     return false;
@@ -2317,33 +2348,68 @@ function assertNonEmpty(value: string, message: string): void {
   }
 }
 
-function normalizeBaseUrl(baseUrl: string): string {
-  return baseUrl.replace(/\/+$/, "");
-}
-
 const MAKEPAY_IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._~:+\/=\-]{8,200}$/;
+const MAKEPAY_NETWORK_ORIGIN_PATTERN =
+  /^([a-z][a-z\d+.-]*):\/\/(\[[^\]]+\]|[^:/?#]+)(?::[0-9]+)?\/?$/i;
+const MAKEPAY_URL_AUTHORITY_PATTERN =
+  /^[a-z][a-z\d+.-]*:\/\/(\[[^\]]+\]|[^:/?#@]+)(?::[0-9]+)?(?=\/|[?#]|$)/i;
+const MAKEPAY_HTTP_LOOPBACK_HOSTS = new Set([
+  "127.0.0.1",
+  "localhost",
+  "[::1]",
+]);
 
 function parseMakePayApiBaseUrl(value: string): URL {
+  return parseMakePayNetworkOrigin(value, "MakePay baseUrl");
+}
+
+function parseMakePayCheckoutBaseUrl(value: string): URL {
+  return parseMakePayNetworkOrigin(value, "MakePay checkout baseUrl");
+}
+
+function parseMakePayParentOrigin(value: string): URL {
+  return parseMakePayNetworkOrigin(value, "MakePay parentOrigin");
+}
+
+function parseMakePayNetworkOrigin(value: string, label: string): URL {
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new MakePayError("MakePay baseUrl must be an absolute HTTP URL.");
+    throw invalidMakePayNetworkOrigin(label);
   }
 
   if (
-    (url.protocol !== "https:" && url.protocol !== "http:") ||
-    url.username ||
-    url.password ||
+    !MAKEPAY_NETWORK_ORIGIN_PATTERN.test(value) ||
+    !isMakePaySecureTransportUrl(value, url) ||
+    url.pathname !== "/" ||
     url.search ||
     url.hash
   ) {
-    throw new MakePayError(
-      "MakePay baseUrl must be an HTTP URL without credentials, query, or fragment.",
-    );
+    throw invalidMakePayNetworkOrigin(label);
   }
 
   return url;
+}
+
+function isMakePaySecureTransportUrl(value: string, url: URL): boolean {
+  const rawHostname =
+    MAKEPAY_URL_AUTHORITY_PATTERN.exec(value)?.[1]?.toLowerCase();
+  return Boolean(
+    rawHostname &&
+      !/\s/.test(value) &&
+      (url.protocol === "https:" ||
+        (url.protocol === "http:" &&
+          MAKEPAY_HTTP_LOOPBACK_HOSTS.has(rawHostname))) &&
+      !url.username &&
+      !url.password,
+  );
+}
+
+function invalidMakePayNetworkOrigin(label: string): MakePayError {
+  return new MakePayError(
+    `${label} must be an HTTPS origin without credentials, path, query, or fragment; HTTP is allowed only for exact loopback hosts localhost, 127.0.0.1, or [::1].`,
+  );
 }
 
 function normalizeMakePayDpopPublicJwk(

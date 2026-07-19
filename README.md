@@ -36,6 +36,16 @@ const makepay = new MakePayClient({
 The client sends `x-makecrypto-key-id` and `x-makecrypto-key-secret` headers to
 the MakePay partner API.
 
+Custom API and checkout base URLs must be origin-only HTTPS URLs. For local
+tests, HTTP is accepted only with the exact hosts `localhost`, `127.0.0.1`, or
+`[::1]` (an explicit port is allowed). Userinfo, paths, query strings,
+fragments, lookalike hostnames, and alternate numeric IP encodings are rejected.
+The same policy applies to anonymous requests and every hosted, embedded,
+modal-script, button, and iframe URL helper. DPoP proof target URLs use the same
+HTTPS-or-exact-loopback transport rule while retaining their required path.
+Embedded-checkout `parentOrigin` values are independently validated as strict
+merchant origins before being serialized or used as the browser default.
+
 ### OAuth and DPoP
 
 Native integrations can instead supply OAuth credentials asynchronously. The
@@ -449,7 +459,10 @@ export async function POST(request: Request) {
 }
 ```
 
-Use `verifyMakePayWebhook` when you only need a boolean result.
+Use `verifyMakePayWebhook` when you only need a boolean result. Webhook
+timestamps use a 300-second freshness window by default. A custom
+`toleranceSeconds` must be finite and greater than zero; zero, negative, `NaN`,
+and infinite values fail verification.
 
 ## Method Coverage
 

@@ -20,6 +20,7 @@ import {
   createMakePayDpopProof,
   createAnonymousPaymentLink,
   generateMakePayDpopKeyPair,
+  mountMakePayCheckout,
   parseMakePayWebhook,
   verifyMakePayWebhook,
 } from "../dist/index.js";
@@ -37,6 +38,27 @@ assert.equal(verifyMakePayWebhook(body, header, "wrong"), false);
 assert.deepEqual(parseMakePayWebhook(body, header, secret), {
   event: { type: "status_changed" },
 });
+
+const staleTimestamp = timestamp - 3_600;
+const staleSignature = createHmac("sha256", secret)
+  .update(`${staleTimestamp}.${body}`)
+  .digest("hex");
+const staleHeader = `t=${staleTimestamp},v1=${staleSignature}`;
+assert.equal(verifyMakePayWebhook(body, staleHeader, secret), false);
+assert.equal(
+  verifyMakePayWebhook(body, staleHeader, secret, { toleranceSeconds: 7_200 }),
+  true,
+);
+for (const toleranceSeconds of [0, -1, Number.NaN, Infinity, -Infinity]) {
+  assert.equal(
+    verifyMakePayWebhook(body, header, secret, { toleranceSeconds }),
+    false,
+  );
+}
+assert.throws(
+  () => parseMakePayWebhook(body, header, secret, { toleranceSeconds: 0 }),
+  (error) => error instanceof MakePayError && error.status === 401,
+);
 
 const requests = [];
 const client = new MakePayClient({
@@ -889,6 +911,311 @@ await assert.rejects(
 );
 assert.equal(escapedOriginFetches, 0);
 
+const networkPolicyAnonymousPayload = {
+  amount: "5",
+  settlement: {
+    currency: "USDT",
+    priorities: [{ chain: "ETH", address: "0xabc", asset: "ETH.USDT-0xabc" }],
+  },
+};
+const allowedLoopbackBaseUrls = [
+  {
+    input: "http://127.0.0.1:4311",
+    origin: "http://127.0.0.1:4311",
+  },
+  {
+    input: "http://localhost:4312/",
+    origin: "http://localhost:4312",
+  },
+  {
+    input: "http://[::1]:4313/",
+    origin: "http://[::1]:4313",
+  },
+];
+
+for (const { input, origin } of allowedLoopbackBaseUrls) {
+  const authenticatedTargets = [];
+  const loopbackClient = new MakePayClient({
+    baseUrl: input,
+    checkoutBaseUrl: input,
+    keyId: "mk_loopback",
+    keySecret: "mksec_loopback",
+    fetch: async (url, init) => {
+      authenticatedTargets.push({ init, url: String(url) });
+      return new Response("{}", {
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  await loopbackClient.listPaymentLinks();
+  assert.equal(
+    authenticatedTargets[0].url,
+    `${origin}/api/partner/v1/makepay/payment-links`,
+  );
+  assert.equal(authenticatedTargets[0].init.redirect, "manual");
+  assert.equal(
+    loopbackClient.hostedCheckoutUrl("pay_loopback"),
+    `${origin}/payment/pay_loopback`,
+  );
+  assert.equal(
+    loopbackClient.hostedDonationUrl("donation-loopback"),
+    `${origin}/donations/donation-loopback`,
+  );
+
+  let anonymousTarget = "";
+  await createAnonymousPaymentLink(networkPolicyAnonymousPayload, {
+    baseUrl: input,
+    fetch: async (url, init) => {
+      anonymousTarget = String(url);
+      assert.equal(init.redirect, "manual");
+      return new Response("{}", {
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  assert.equal(
+    anonymousTarget,
+    `${origin}/api/partner/v1/makepay/payment-links`,
+  );
+  assert.equal(
+    buildMakePayHostedCheckoutUrl("pay_loopback", { baseUrl: input }),
+    `${origin}/payment/pay_loopback`,
+  );
+  assert.equal(
+    buildMakePayHostedDonationUrl("donation-loopback", { baseUrl: input }),
+    `${origin}/donations/donation-loopback`,
+  );
+  assert.equal(
+    buildMakePayEmbeddedCheckoutUrl("pay_loopback", { baseUrl: input }),
+    `${origin}/embed/payment/pay_loopback`,
+  );
+  assert.equal(
+    buildMakePayEmbeddedCheckoutUrl("pay_loopback", {
+      baseUrl: input,
+      parentOrigin: input,
+    }),
+    `${origin}/embed/payment/pay_loopback?parentOrigin=${encodeURIComponent(origin)}`,
+  );
+  assert.equal(
+    buildMakePayEmbeddedDonationUrl("donation-loopback", { baseUrl: input }),
+    `${origin}/embed/donations/donation-loopback`,
+  );
+  assert.equal(
+    buildMakePayModalScriptUrl({ baseUrl: input }),
+    `${origin}/modal/makepay.min.js`,
+  );
+  assert.ok(
+    buildMakePayEmbedButtonHtml("pay_loopback", {
+      baseUrl: input,
+    }).includes(`src="${origin}/modal/makepay.min.js"`),
+  );
+  assert.ok(
+    buildMakePayIframeHtml("pay_loopback", {
+      baseUrl: input,
+    }).includes(`src="${origin}/embed/payment/pay_loopback"`),
+  );
+}
+
+const rejectedNetworkBaseUrls = [
+  "http://non-loopback.example",
+  "http://localhost.evil.example",
+  "http://127.0.0.1.evil.example",
+  "http://localhost.",
+  "http://127.0.0.1.",
+  "http://127.1",
+  "http://2130706433",
+  "http://0x7f000001",
+  "http://0177.0.0.1",
+  "http://[0:0:0:0:0:0:0:1]",
+  "http://[::ffff:127.0.0.1]",
+  "http://127.0.0.1@evil.example",
+  "ftp://localhost",
+  "ws://localhost",
+  "https://user:password@pay.example",
+  "https://pay.example/base-path",
+  "https://pay.example?environment=test",
+  "https://pay.example#fragment",
+  " https://pay.example",
+];
+
+for (const baseUrl of rejectedNetworkBaseUrls) {
+  assert.throws(
+    () =>
+      new MakePayClient({
+        baseUrl,
+        keyId: "mk_guard",
+        keySecret: "mksec_guard",
+        fetch: async () => new Response("{}"),
+      }),
+    /must be an HTTPS origin/,
+  );
+  assert.throws(
+    () =>
+      new MakePayClient({
+        checkoutBaseUrl: baseUrl,
+        keyId: "mk_guard",
+        keySecret: "mksec_guard",
+        fetch: async () => new Response("{}"),
+      }),
+    /must be an HTTPS origin/,
+  );
+
+  let anonymousFetches = 0;
+  await assert.rejects(
+    () =>
+      createAnonymousPaymentLink(networkPolicyAnonymousPayload, {
+        baseUrl,
+        fetch: async () => {
+          anonymousFetches += 1;
+          return new Response("{}");
+        },
+      }),
+    /must be an HTTPS origin/,
+  );
+  assert.equal(anonymousFetches, 0);
+
+  for (const buildUrl of [
+    () => buildMakePayHostedCheckoutUrl("pay_guard", { baseUrl }),
+    () => buildMakePayHostedDonationUrl("donation-guard", { baseUrl }),
+    () => buildMakePayEmbeddedCheckoutUrl("pay_guard", { baseUrl }),
+    () => buildMakePayEmbeddedDonationUrl("donation-guard", { baseUrl }),
+    () => buildMakePayModalScriptUrl({ baseUrl }),
+    () => buildMakePayEmbedButtonHtml("pay_guard", { baseUrl }),
+    () => buildMakePayIframeHtml("pay_guard", { baseUrl }),
+  ]) {
+    assert.throws(buildUrl, /must be an HTTPS origin/);
+  }
+}
+
+for (const parentOrigin of [
+  ...rejectedNetworkBaseUrls,
+  "",
+  "*",
+  "null",
+]) {
+  for (const buildEmbed of [
+    () =>
+      buildMakePayEmbeddedCheckoutUrl("pay_guard", { parentOrigin }),
+    () =>
+      buildMakePayEmbeddedDonationUrl("donation-guard", { parentOrigin }),
+    () => buildMakePayIframeHtml("pay_guard", { parentOrigin }),
+  ]) {
+    assert.throws(buildEmbed, /parentOrigin must be an HTTPS origin/);
+  }
+}
+
+const browserGlobalDescriptors = Object.fromEntries(
+  ["document", "location", "window"].map((name) => [
+    name,
+    Object.getOwnPropertyDescriptor(globalThis, name),
+  ]),
+);
+const mountedIframe = {
+  removed: false,
+  remove() {
+    this.removed = true;
+  },
+  setAttribute() {},
+  style: {},
+};
+let appendedIframe;
+Object.defineProperty(globalThis, "document", {
+  configurable: true,
+  value: {
+    createElement(tagName) {
+      assert.equal(tagName, "iframe");
+      return mountedIframe;
+    },
+  },
+});
+Object.defineProperty(globalThis, "window", {
+  configurable: true,
+  value: {
+    addEventListener() {},
+    removeEventListener() {},
+  },
+});
+Object.defineProperty(globalThis, "location", {
+  configurable: true,
+  value: { origin: "http://LOCALHOST:4312" },
+});
+try {
+  const container = {
+    append(iframe) {
+      appendedIframe = iframe;
+    },
+  };
+  const mounted = mountMakePayCheckout({
+    container,
+    paymentUid: "pay_parent_origin",
+  });
+  assert.equal(appendedIframe, mountedIframe);
+  assert.equal(
+    mounted.iframe.src,
+    "https://www.makepay.io/embed/payment/pay_parent_origin?parentOrigin=http%3A%2F%2Flocalhost%3A4312",
+  );
+  mounted.unmount();
+  assert.equal(mountedIframe.removed, true);
+
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: { origin: "http://merchant.example" },
+  });
+  assert.throws(
+    () =>
+      mountMakePayCheckout({
+        container,
+        paymentUid: "pay_unsafe_parent_origin",
+      }),
+    /parentOrigin must be an HTTPS origin/,
+  );
+} finally {
+  for (const [name, descriptor] of Object.entries(browserGlobalDescriptors)) {
+    if (descriptor) {
+      Object.defineProperty(globalThis, name, descriptor);
+    } else {
+      delete globalThis[name];
+    }
+  }
+}
+
+for (const { origin } of allowedLoopbackBaseUrls) {
+  assert.match(
+    createMakePayDpopProof({
+      accessToken: "loopback_access",
+      method: "POST",
+      privateKey: dpopKeyPair.privateKeyPem,
+      url: `${origin}/oauth/token?test=true#ignored`,
+    }),
+    /^[^.]+\.[^.]+\.[^.]+$/,
+  );
+}
+
+for (const url of [
+  "http://non-loopback.example/oauth/token",
+  "http://localhost.evil.example/oauth/token",
+  "http://127.0.0.1.evil.example/oauth/token",
+  "http://127.1/oauth/token",
+  "http://2130706433/oauth/token",
+  "http://0x7f000001/oauth/token",
+  "http://0177.0.0.1/oauth/token",
+  "http://[0:0:0:0:0:0:0:1]/oauth/token",
+  "http://[::ffff:127.0.0.1]/oauth/token",
+  "ftp://localhost/oauth/token",
+  "ws://localhost/oauth/token",
+]) {
+  assert.throws(
+    () =>
+      createMakePayDpopProof({
+        accessToken: "guarded_access",
+        method: "POST",
+        privateKey: dpopKeyPair.privateKeyPem,
+        url,
+      }),
+    /must be an HTTPS URL/,
+  );
+}
+
 assert.throws(
   () =>
     new MakePayClient({
@@ -896,7 +1223,7 @@ assert.throws(
       keyId: "mk_guard",
       keySecret: "mksec_guard",
     }),
-  /without credentials, query, or fragment/,
+  /must be an HTTPS origin/,
 );
 
 assert.throws(

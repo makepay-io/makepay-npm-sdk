@@ -23,6 +23,13 @@ All notable changes to `@makecrypto/makepay` are documented here.
 - Requests refuse cross-origin path escapes and use manual redirect handling so
   credentials and DPoP proofs are never automatically forwarded to a redirect
   target.
+- API, anonymous, checkout, script, iframe, and DPoP transport URLs require
+  HTTPS; HTTP is limited to exact loopback hosts for local testing, and base
+  URLs remain origin-only.
+- Embedded-checkout parent origins are normalized and validated before they are
+  serialized or used for browser message targeting.
+- Webhook verification rejects non-finite or non-positive timestamp tolerances
+  instead of allowing them to disable freshness checks.
 - The default hosted checkout and embedded checkout URLs use the canonical
   `www.makepay.io` origin; the production modal loader uses the MakePay CDN.
 - Published JavaScript and declarations no longer include source maps.
