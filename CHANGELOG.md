@@ -2,7 +2,7 @@
 
 All notable changes to `@makecrypto/makepay` are documented here.
 
-## 0.4.0 - 2026-07-19
+## 0.4.0 - Unreleased
 
 ### Added
 
