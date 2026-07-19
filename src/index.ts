@@ -1011,6 +1011,7 @@ type MakePayBrowserWindow = Window & {
 
 export class MakePayError extends Error {
   readonly status: number;
+  /** @deprecated Remote response bodies are intentionally never retained. */
   readonly responseBody: unknown;
 
   constructor(
@@ -1020,7 +1021,8 @@ export class MakePayError extends Error {
     super(message);
     this.name = "MakePayError";
     this.status = options.status ?? 0;
-    this.responseBody = options.responseBody;
+    // Keep the pre-0.4 public shape without retaining untrusted response data.
+    this.responseBody = undefined;
   }
 }
 
@@ -1803,8 +1805,13 @@ export class MakePayClient {
       }
 
       if (this.authProvider) {
-        const authorization =
-          await this.authProvider.getAuthorization(requestContext);
+        let authorization: MakePayOAuthAuthorization;
+        try {
+          authorization =
+            await this.authProvider.getAuthorization(requestContext);
+        } catch {
+          throw new MakePayError("MakePay OAuth authorization failed.");
+        }
         const accessToken = authorization.accessToken?.trim();
         if (!accessToken) {
           throw new MakePayError(
@@ -1842,10 +1849,16 @@ export class MakePayClient {
         attempt === 0 &&
         this.authProvider?.refreshAuthorization
       ) {
-        await this.authProvider.refreshAuthorization({
-          ...requestContext,
-          response,
-        });
+        try {
+          await this.authProvider.refreshAuthorization({
+            ...requestContext,
+            response: sanitizeOAuthRefreshResponse(response),
+          });
+        } catch {
+          throw new MakePayError("MakePay OAuth refresh failed.", {
+            status: response.status,
+          });
+        }
         continue;
       }
 
@@ -2327,21 +2340,18 @@ async function decodeMakePayResponse(
   const decoded = text ? safeJsonParse(text) : {};
 
   if (!response.ok) {
-    throw new MakePayError(readErrorMessage(decoded, response.status), {
-      responseBody: decoded,
-      status: response.status,
-    });
+    // Remote error text is untrusted and can contain reflected credentials,
+    // customer data, or request diagnostics. Keep SDK errors safe to log by
+    // exposing only the HTTP status and a stable local message.
+    throw new MakePayError(
+      `MakePay API request failed with HTTP ${response.status}.`,
+      {
+        status: response.status,
+      },
+    );
   }
 
   return isRecord(decoded) ? decoded : {};
-}
-
-function readErrorMessage(decoded: unknown, status: number): string {
-  if (isRecord(decoded) && typeof decoded.error === "string") {
-    return decoded.error;
-  }
-
-  return `MakePay API request failed with HTTP ${status}.`;
 }
 
 function assertNonEmpty(value: string, message: string): void {
@@ -2351,6 +2361,7 @@ function assertNonEmpty(value: string, message: string): void {
 }
 
 const MAKEPAY_IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._~:+\/=\-]{8,200}$/;
+const MAKEPAY_DPOP_NONCE_PATTERN = /^[A-Za-z0-9._~\-]{1,512}$/;
 const MAKEPAY_NETWORK_ORIGIN_PATTERN =
   /^([a-z][a-z\d+.-]*):\/\/(\[[^\]]+\]|[^:/?#]+)(?::[0-9]+)?\/?$/i;
 const MAKEPAY_URL_AUTHORITY_PATTERN =
@@ -2360,6 +2371,15 @@ const MAKEPAY_HTTP_LOOPBACK_HOSTS = new Set([
   "localhost",
   "[::1]",
 ]);
+
+function sanitizeOAuthRefreshResponse(response: Response): Response {
+  const headers = new Headers();
+  const nonce = response.headers.get("dpop-nonce")?.trim();
+  if (nonce && MAKEPAY_DPOP_NONCE_PATTERN.test(nonce)) {
+    headers.set("dpop-nonce", nonce);
+  }
+  return new Response(null, { headers, status: response.status });
+}
 
 function parseMakePayApiBaseUrl(value: string): URL {
   return parseMakePayNetworkOrigin(value, "MakePay baseUrl");

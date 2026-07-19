@@ -5,6 +5,7 @@ import {
   createPublicKey,
   verify as verifySignature,
 } from "node:crypto";
+import { inspect } from "node:util";
 
 import {
   MakePayClient,
@@ -837,6 +838,7 @@ assert.deepEqual(JSON.parse(webhookSubscriptionRequests[1].init.body), {
 
 let persistentUnauthorizedRequests = 0;
 let persistentRefreshCalls = 0;
+let persistentUnauthorizedError;
 const persistentUnauthorizedClient = new MakePayClient({
   authProvider: {
     async getAuthorization() {
@@ -848,18 +850,169 @@ const persistentUnauthorizedClient = new MakePayClient({
   },
   fetch: async () => {
     persistentUnauthorizedRequests += 1;
-    return new Response(JSON.stringify({ error: "unauthorized" }), {
-      headers: { "content-type": "application/json" },
-      status: 401,
-    });
+    return new Response(
+      JSON.stringify({
+        error:
+          "sdk_access_token_sentinel sdk_refresh_token_sentinel buyer-sentinel@example.test",
+        nested: { authorization: "Bearer sdk_bearer_sentinel" },
+      }),
+      {
+        headers: { "content-type": "application/json" },
+        status: 401,
+      },
+    );
   },
 });
 await assert.rejects(
   () => persistentUnauthorizedClient.listPaymentLinks(),
-  (error) => error instanceof MakePayError && error.status === 401,
+  (error) => {
+    persistentUnauthorizedError = error;
+    return error instanceof MakePayError && error.status === 401;
+  },
 );
 assert.equal(persistentUnauthorizedRequests, 2);
 assert.equal(persistentRefreshCalls, 1);
+assert.equal(
+  persistentUnauthorizedError.message,
+  "MakePay API request failed with HTTP 401.",
+);
+assert.equal(persistentUnauthorizedError.responseBody, undefined);
+const visibleUnauthorizedError = [
+  String(persistentUnauthorizedError),
+  JSON.stringify(persistentUnauthorizedError),
+  inspect(persistentUnauthorizedError, { depth: 10, showHidden: true }),
+  ...Reflect.ownKeys(persistentUnauthorizedError).map((key) =>
+    String(persistentUnauthorizedError[key]),
+  ),
+].join("\n");
+for (const sentinel of [
+  "sdk_access_token_sentinel",
+  "sdk_refresh_token_sentinel",
+  "buyer-sentinel@example.test",
+  "sdk_bearer_sentinel",
+]) {
+  assert.equal(visibleUnauthorizedError.includes(sentinel), false, sentinel);
+}
+
+const ignoredConstructorBody = new MakePayError("safe constructor error", {
+  responseBody: {
+    token: "sdk_constructor_body_sentinel",
+  },
+  status: 409,
+});
+assert.equal(ignoredConstructorBody.status, 409);
+assert.equal(ignoredConstructorBody.responseBody, undefined);
+assert.equal(
+  inspect(ignoredConstructorBody, { depth: 10, showHidden: true }).includes(
+    "sdk_constructor_body_sentinel",
+  ),
+  false,
+);
+
+let throwingRefreshError;
+const throwingRefreshClient = new MakePayClient({
+  authProvider: {
+    async getAuthorization() {
+      return { accessToken: "sdk_refresh_access_token_sentinel" };
+    },
+    async refreshAuthorization(request) {
+      const body = await request.response.text();
+      assert.equal(body, "");
+      assert.equal(request.response.headers.get("x-reflected-secret"), null);
+      assert.equal(request.response.headers.get("dpop-nonce"), "safe_nonce-1");
+      throw new Error(
+        `sdk_refresh_callback_sentinel ${body} ${request.response.headers.get("x-reflected-secret")}`,
+      );
+    },
+  },
+  fetch: async () =>
+    new Response(
+      JSON.stringify({
+        error: "sdk_refresh_response_body_sentinel",
+      }),
+      {
+        headers: {
+          "dpop-nonce": "safe_nonce-1",
+          "x-reflected-secret": "sdk_refresh_header_sentinel",
+        },
+        status: 401,
+      },
+    ),
+});
+await assert.rejects(
+  () => throwingRefreshClient.listPaymentLinks(),
+  (error) => {
+    throwingRefreshError = error;
+    return (
+      error instanceof MakePayError &&
+      error.status === 401 &&
+      error.message === "MakePay OAuth refresh failed."
+    );
+  },
+);
+const visibleThrowingRefreshError = inspect(throwingRefreshError, {
+  depth: 10,
+  showHidden: true,
+});
+for (const sentinel of [
+  "sdk_refresh_access_token_sentinel",
+  "sdk_refresh_callback_sentinel",
+  "sdk_refresh_response_body_sentinel",
+  "sdk_refresh_header_sentinel",
+]) {
+  assert.equal(visibleThrowingRefreshError.includes(sentinel), false, sentinel);
+}
+
+let throwingAuthorizationError;
+await assert.rejects(
+  () =>
+    new MakePayClient({
+      authProvider: {
+        async getAuthorization() {
+          throw new Error("sdk_authorization_callback_sentinel");
+        },
+      },
+      fetch: async () => {
+        throw new Error("fetch must not be reached");
+      },
+    }).listPaymentLinks(),
+  (error) => {
+    throwingAuthorizationError = error;
+    return (
+      error instanceof MakePayError &&
+      error.message === "MakePay OAuth authorization failed."
+    );
+  },
+);
+assert.equal(
+  inspect(throwingAuthorizationError, { depth: 10, showHidden: true }).includes(
+    "sdk_authorization_callback_sentinel",
+  ),
+  false,
+);
+
+let malformedRemoteError;
+await assert.rejects(
+  () =>
+    new MakePayClient({
+      keyId: "mk_error_sentinel",
+      keySecret: "mksec_error_sentinel",
+      fetch: async () =>
+        new Response("not-json sdk_plaintext_error_sentinel", {
+          status: 502,
+        }),
+    }).listPaymentLinks(),
+  (error) => {
+    malformedRemoteError = error;
+    return error instanceof MakePayError && error.status === 502;
+  },
+);
+assert.equal(
+  inspect(malformedRemoteError, { depth: 10, showHidden: true }).includes(
+    "sdk_plaintext_error_sentinel",
+  ),
+  false,
+);
 
 await assert.rejects(
   () =>

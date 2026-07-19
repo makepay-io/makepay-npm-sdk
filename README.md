@@ -567,7 +567,11 @@ document, reconciliation, and stat views from a single response.
 
 ## Errors
 
-API calls throw `MakePayError` with `status` and `responseBody` fields.
+API calls throw `MakePayError` with a numeric HTTP `status`. Remote error
+bodies are intentionally not attached or reflected in the message, so the
+error is safe to pass through normal application logging boundaries. The
+deprecated `responseBody` property remains for source compatibility but is
+always `undefined`.
 
 ```ts
 import { MakePayError } from "@makecrypto/makepay";
@@ -576,7 +580,7 @@ try {
   await makepay.getPaymentLink("PAYMENT_LINK_UID");
 } catch (error) {
   if (error instanceof MakePayError) {
-    console.error(error.status, error.responseBody);
+    console.error(error.status, error.message);
   }
 }
 ```
