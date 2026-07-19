@@ -106,6 +106,57 @@ if (
   fail("package.json files must remain the exact reviewed release allowlist.");
 }
 
+for (const workflowPath of [
+  ".github/workflows/ci.yml",
+  ".github/workflows/publish.yml",
+]) {
+  const workflow = readFileSync(join(repositoryRoot, workflowPath), "utf8");
+  const actionReferences = workflow
+    .split(/\r?\n/)
+    .filter((line) => /^\s*uses:/.test(line));
+  if (!actionReferences.length) {
+    fail(`${workflowPath} must use at least one pinned action.`);
+  }
+  for (const reference of actionReferences) {
+    if (!/^\s*uses:\s+[^\s@]+@[a-f0-9]{40}\s+#\s+v\d+\.\d+\.\d+\s*$/.test(reference)) {
+      fail(`${workflowPath} contains an unpinned action: ${reference.trim()}`);
+    }
+  }
+}
+
+const publishWorkflow = readFileSync(
+  join(repositoryRoot, ".github/workflows/publish.yml"),
+  "utf8",
+);
+if ((publishWorkflow.match(/id-token:\s*write/g) ?? []).length !== 1) {
+  fail("Only the minimal npm publish job may receive OIDC permission.");
+}
+for (const requiredReleaseControl of [
+  "prepare-candidate:",
+  "needs: prepare-candidate",
+  "environment: npm-release",
+  "npm pack --ignore-scripts --json",
+  "Upload immutable npm candidate",
+  "Download the validated candidate",
+  "candidate.sha256",
+  "candidate.sha1",
+  "candidate.integrity",
+  'npm publish "release-candidate/${filename}"',
+  "--ignore-scripts",
+  "--provenance",
+  "--tag next",
+]) {
+  if (!publishWorkflow.includes(requiredReleaseControl)) {
+    fail(`Publish workflow is missing ${requiredReleaseControl}.`);
+  }
+}
+const publishJob = publishWorkflow.slice(
+  publishWorkflow.indexOf("  publish-next:"),
+);
+if (publishJob.includes("actions/checkout@")) {
+  fail("The OIDC npm publish job must not checkout repository-controlled code.");
+}
+
 const compilerOptions = JSON.parse(
   readFileSync(join(repositoryRoot, "tsconfig.json"), "utf8"),
 ).compilerOptions;
