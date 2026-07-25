@@ -12,7 +12,7 @@ on:
         type: string
 
 concurrency:
-  group: npm-publish-${{ inputs.release_tag || github.ref }}
+  group: npm-publish-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions:

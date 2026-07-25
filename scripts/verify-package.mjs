@@ -142,6 +142,7 @@ for (const requiredReleaseControl of [
   "candidate.sha1",
   "candidate.integrity",
   "Checkout does not match immutable tag",
+  "group: npm-publish-${{ inputs.release_tag || github.ref_name }}",
   "candidate.releaseTag",
   "candidate.workflowCommit",
   'npm publish "./release-candidate/${filename}"',
