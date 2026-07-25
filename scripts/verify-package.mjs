@@ -141,7 +141,11 @@ for (const requiredReleaseControl of [
   "candidate.sha256",
   "candidate.sha1",
   "candidate.integrity",
-  'npm publish "release-candidate/${filename}"',
+  "Checkout does not match immutable tag",
+  "group: npm-publish-${{ inputs.release_tag || github.ref_name }}",
+  "candidate.releaseTag",
+  "candidate.workflowCommit",
+  'npm publish "./release-candidate/${filename}"',
   "--ignore-scripts",
   "--provenance",
   "--tag next",
@@ -149,6 +153,9 @@ for (const requiredReleaseControl of [
   if (!publishWorkflow.includes(requiredReleaseControl)) {
     fail(`Publish workflow is missing ${requiredReleaseControl}.`);
   }
+}
+if (publishWorkflow.includes('npm publish "release-candidate/${filename}"')) {
+  fail("Publish workflow must use an explicit relative tarball path.");
 }
 const publishJob = publishWorkflow.slice(
   publishWorkflow.indexOf("  publish-next:"),

@@ -5,9 +5,14 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Immutable release tag to republish after an infrastructure-only failure
+        required: true
+        type: string
 
 concurrency:
-  group: npm-publish-${{ github.ref }}
+  group: npm-publish-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
@@ -23,6 +28,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           fetch-depth: 0
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
@@ -31,16 +37,40 @@ jobs:
           package-manager-cache: false
 
       - name: Verify tag, version, and main ancestry
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
-          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "v${version}" ]]; then
-            echo "Release must run from tag v${version}." >&2
+          if [[ "${RELEASE_TAG}" != "v${version}" ]]; then
+            echo "Release tag must be v${version}." >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${RELEASE_TAG}" ]]; then
+              echo "Push releases must run from ${RELEASE_TAG}." >&2
+              exit 1
+            fi
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+              echo "Recovery dispatches must use the main workflow." >&2
+              exit 1
+            fi
+          else
+            echo "Unsupported release event ${GITHUB_EVENT_NAME}." >&2
+            exit 1
+          fi
+          release_commit="$(git rev-parse HEAD)"
+          tag_commit="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+          if [[ "${release_commit}" != "${tag_commit}" ]]; then
+            echo "Checkout does not match immutable tag ${RELEASE_TAG}." >&2
             exit 1
           fi
           git fetch --no-tags origin main
-          git merge-base --is-ancestor "${GITHUB_SHA}" origin/main
+          git merge-base --is-ancestor "${release_commit}" origin/main
+          echo "commit=${release_commit}" >> "${GITHUB_OUTPUT}"
 
       - name: Install dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
@@ -58,6 +88,9 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
 
       - name: Pack the exact reviewed build
+        env:
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -80,14 +113,16 @@ jobs:
             join("release-candidate", "candidate.json"),
             `${JSON.stringify(
               {
-                commit: process.env.GITHUB_SHA,
+                commit: process.env.RELEASE_COMMIT,
                 filename: packed.filename,
                 integrity: packed.integrity,
                 name: packed.name,
+                releaseTag: process.env.RELEASE_TAG,
                 sha1: packed.shasum,
                 sha256: createHash("sha256").update(bytes).digest("hex"),
                 size: bytes.length,
                 version: packed.version,
+                workflowCommit: process.env.GITHUB_SHA,
               },
               null,
               2,
@@ -136,6 +171,8 @@ jobs:
             --dir release-candidate
 
       - name: Verify downloaded tarball identity and digest
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -156,9 +193,10 @@ jobs:
           assert.equal(candidate.filename, basename(candidate.filename))
           assert.match(candidate.filename, /^[a-z0-9][a-z0-9._-]*\.tgz$/)
           const tarball = readFileSync(process.env.TARBALL)
-          assert.equal(candidate.commit, process.env.GITHUB_SHA)
-          assert.equal(process.env.GITHUB_REF_TYPE, "tag")
-          assert.equal(process.env.GITHUB_REF_NAME, `v${candidate.version}`)
+          assert.match(candidate.commit, /^[0-9a-f]{40}$/)
+          assert.equal(candidate.releaseTag, process.env.RELEASE_TAG)
+          assert.equal(candidate.releaseTag, `v${candidate.version}`)
+          assert.equal(candidate.workflowCommit, process.env.GITHUB_SHA)
           assert.equal(tarball.length, candidate.size)
           assert.equal(
             createHash("sha256").update(tarball).digest("hex"),
@@ -201,7 +239,7 @@ jobs:
         run: |
           set -euo pipefail
           filename="$(node -p "require('./release-candidate/candidate.json').filename")"
-          npm publish "release-candidate/${filename}" \
+          npm publish "./release-candidate/${filename}" \
             --ignore-scripts \
             --provenance \
             --access public \
