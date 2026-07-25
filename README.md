@@ -36,24 +36,88 @@ const makepay = new MakePayClient({
 The client sends `x-makecrypto-key-id` and `x-makecrypto-key-secret` headers to
 the MakePay partner API.
 
+Custom API and checkout base URLs must be origin-only HTTPS URLs. For local
+tests, HTTP is accepted only with the exact hosts `localhost`, `127.0.0.1`, or
+`[::1]` (an explicit port is allowed). Userinfo, paths, query strings,
+fragments, lookalike hostnames, and alternate numeric IP encodings are rejected.
+The same policy applies to anonymous requests and every hosted, embedded,
+modal-script, button, and iframe URL helper. DPoP proof target URLs use the same
+HTTPS-or-exact-loopback transport rule while retaining their required path.
+Embedded-checkout `parentOrigin` values are independently validated as strict
+merchant origins before being serialized or used as the browser default.
+
+### OAuth and DPoP
+
+Native integrations can instead supply OAuth credentials asynchronously. The
+host application remains responsible for encrypting tokens and the DPoP private
+key, serializing refreshes, and atomically persisting rotated refresh tokens.
+
+```ts
+import {
+  MakePayClient,
+  createMakePayDpopProof,
+  type MakePayAuthProvider,
+} from "@makecrypto/makepay";
+
+const authProvider: MakePayAuthProvider = {
+  async getAuthorization({ method, url }) {
+    const credentials = await tokenStore.load();
+
+    return {
+      accessToken: credentials.accessToken,
+      tokenType: "DPoP",
+      dpopProof: createMakePayDpopProof({
+        accessToken: credentials.accessToken,
+        method,
+        privateKey: credentials.dpopPrivateKeyPem,
+        url,
+      }),
+    };
+  },
+  async refreshAuthorization() {
+    // Refresh once under your application's lock and persist both rotated
+    // tokens before this promise resolves.
+    await tokenStore.refresh();
+  },
+};
+
+const makepay = new MakePayClient({ authProvider });
+```
+
+On a `401`, the SDK invokes `refreshAuthorization` at most once and rebuilds
+authorization (including a fresh DPoP proof) before one retry. It never owns or
+persists OAuth tokens. `generateMakePayDpopKeyPair`,
+`calculateMakePayDpopJwkThumbprint`, and `createMakePayDpopProof` are available
+for native authorization-code integrations.
+
 ## Payment Links
 
 ```ts
-const response = await makepay.createPaymentLink({
-  title: "Order #1042",
-  description: "Checkout for order #1042",
-  amount: "129.99",
-  currency: "USDT",
-  orderId: "order_1042",
-  customerEmail: "buyer@example.com",
-  returnUrl: "https://merchant.example/orders/1042",
-  successUrl: "https://merchant.example/orders/1042/success",
-  failureUrl: "https://merchant.example/orders/1042/pay",
-  expirationTime: "12h",
-});
+const response = await makepay.createPaymentLink(
+  {
+    title: "Order #1042",
+    description: "Checkout for order #1042",
+    amount: "129.99",
+    currency: "USDT",
+    orderId: "order_1042",
+    customerEmail: "buyer@example.com",
+    returnUrl: "https://merchant.example/orders/1042",
+    successUrl: "https://merchant.example/orders/1042/success",
+    failureUrl: "https://merchant.example/orders/1042/pay",
+    expirationTime: "12h",
+  },
+  {
+    // Reuse this value while reconciling an ambiguous network outcome.
+    idempotencyKey: "order_1042:payment-link:v1",
+  },
+);
 
 console.log(response.paymentLink);
 ```
+
+`createPaymentLink`, `updatePaymentLink`, and the current webhook-subscription
+mutations accept an `idempotencyKey`. Reuse the same key only for an identical
+mutation; MakePay rejects reuse with a different method, path, or body.
 
 Read, update, and email existing links:
 
@@ -61,6 +125,14 @@ Read, update, and email existing links:
 await makepay.listPaymentLinks();
 await makepay.getPaymentLink("PAYMENT_LINK_UID");
 await makepay.updatePaymentLink("PAYMENT_LINK_UID", { status: "paused" });
+await makepay.updatePaymentLink("PAYMENT_LINK_UID", {
+  metadata: {
+    medusaOrderId: "order_01J...",
+    medusaOrderDisplayId: "1042",
+    medusaAdminUrl: "https://merchant.example/app/orders/order_01J...",
+    medusaInstallationId: "installation_01J...",
+  },
+});
 await makepay.sendPaymentRequestEmail("PAYMENT_LINK_UID", "buyer@example.com");
 ```
 
@@ -150,7 +222,8 @@ const mounted = mountMakePayCheckout({
 Embedded checkout supports `viewType: "full" | "minimal"`. The default
 `"full"` view matches the hosted payment page layout. Use `"minimal"` when the
 checkout is already inside your own page or modal and should show only the
-compact payment form.
+compact payment form. The mounted helper accepts checkout events only when both
+the configured MakePay origin and the mounted iframe window match.
 
 Donation pages also have URL helpers:
 
@@ -344,6 +417,26 @@ await makepay.listDestinationAssets();
 await makepay.listWebhookRequests({ limit: 25 });
 ```
 
+OAuth integrations should use a grant-scoped webhook subscription rather than
+changing a company-global callback URL. The signing secret is returned only on
+creation or explicit rotation, so persist it immediately. PUT and DELETE
+require an idempotency key.
+
+```ts
+const created = await makepay.upsertCurrentWebhookSubscription(
+  {
+    url: "https://merchant.example/webhooks/makepay",
+    events: ["makepay.payment.status_changed"],
+  },
+  { idempotencyKey: "installation_123:webhook:v1" },
+);
+
+await makepay.getCurrentWebhookSubscription();
+await makepay.deleteCurrentWebhookSubscription({
+  idempotencyKey: "installation_123:webhook-delete:v1",
+});
+```
+
 ## Webhook Verification
 
 Read the exact raw body before parsing JSON.
@@ -367,7 +460,10 @@ export async function POST(request: Request) {
 }
 ```
 
-Use `verifyMakePayWebhook` when you only need a boolean result.
+Use `verifyMakePayWebhook` when you only need a boolean result. Webhook
+timestamps use a 300-second freshness window by default. A custom
+`toleranceSeconds` must be finite and greater than zero; zero, negative, `NaN`,
+and infinite values fail verification.
 
 ## Method Coverage
 
@@ -384,7 +480,7 @@ Use `verifyMakePayWebhook` when you only need a boolean result.
 | Simple Shop     | `getShop`, `updateShop`, `getShopBuilder`, `updateShopBuilder`, `getShopDomain`, `updateShopDomain`, `refreshShopDomain`, coupons, orders |
 | Bookkeeping     | summary, invoice, expense, document upload/OCR, and reconciliation methods                                                                |
 | Branding        | `getBranding`, `updateBranding`, `refreshBrandingDomains`                                                                                 |
-| Operations      | `getSettings`, `updateSettings`, `listDestinationAssets`, `listWebhookRequests`                                                           |
+| Operations      | `getSettings`, `updateSettings`, `listDestinationAssets`, `listWebhookRequests`, current webhook subscription CRUD                        |
 | Webhooks        | `verifyMakePayWebhook`, `parseMakePayWebhook`                                                                                             |
 
 ## TypeScript, Data Models, And Response Models
@@ -395,10 +491,15 @@ secondary SDK package.
 
 ```ts
 import type {
+  MakePayAnonymousPaymentLinkResponse,
   MakePayBookkeepingInvoicePayload,
   MakePayBookkeepingSummaryResponse,
+  MakePayAuthProvider,
+  MakePayDonationLinksResponse,
   MakePayPaymentLinkPayload,
   MakePayPaymentLinkResponse,
+  MakePayPaymentRequestEmailResponse,
+  MakePayWebhookSubscriptionResponse,
 } from "@makecrypto/makepay";
 ```
 
@@ -412,6 +513,10 @@ Model conventions:
   use `YYYY-MM-DD`.
 - IDs are usually public `uid` values. Bookkeeping detail endpoints accept an
   internal UUID or public UID.
+- Authenticated partner-v1 payment links retain the original values under
+  `paymentLink.payload` and also expose normalized `amount`, `fiatCurrency`,
+  `metadata`, correlation fields, latest session, and timeline fields directly
+  on `paymentLink`.
 - API methods throw `MakePayError` for non-2xx responses. Successful responses
   are typed envelopes with index signatures, so production can add fields
   without breaking TypeScript consumers.
@@ -421,6 +526,7 @@ Model conventions:
 | Model                                     | Used by                                                                                        | Required fields                                          | Common optional fields                                                                                                            |
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | `MakePayPaymentLinkPayload`               | `createPaymentLink`                                                                            | `amount`                                                 | `title`, `description`, `currency`, `asset`, `orderId`, `customerEmail`, `clientId`, `returnUrl`, `successUrl`, `metadata`        |
+| `MakePayPaymentLinkUpdate`                | `updatePaymentLink`                                                                            | at least one update field                                | status/expiry controls or allowlisted Medusa order-correlation metadata                                                           |
 | `MakePayDonationLinkPayload`              | `createDonationLink`                                                                           | none                                                     | `defaultAmountUsd`, `minimumAmountUsd`, `donationSlug`, payment-link display and redirect fields                                  |
 | `MakePayAnonymousPaymentLinkPayload`      | `createAnonymousPaymentLink`                                                                   | `amount`, `settlement.currency`, `settlement.priorities` | `title`, `customerEmail`, `orderId`, `metadata`, `branding`, `webhookUrl`, checkout redirect URLs                                 |
 | `MakePayCustomerPayload`                  | `upsertCustomer`                                                                               | one of `email`, `customerEmail`, `name`, `clientId`      | `metadata`                                                                                                                        |
@@ -439,9 +545,11 @@ Model conventions:
 
 | Functions                                                                                                                | Resolves to                                                                              | Key fields                                                                                                  |
 | ------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `createPaymentLink`, `getPaymentLink`, `updatePaymentLink`, `sendPaymentRequestEmail`, donation variants                 | `MakePayPaymentLinkResponse`                                                             | `ok`, `companyId`, `paymentLink`, `paymentRequestEmailSent`, `paymentRequestEmailError`                     |
-| `listPaymentLinks`, `listDonationLinks`                                                                                  | `MakePayPaymentLinksResponse`                                                            | `companyId`, `paymentLinks`                                                                                 |
-| `createAnonymousPaymentLink`                                                                                             | `MakePayPaymentLinkResponse`                                                             | `paymentLink`, plus public-link metadata returned by the API                                                |
+| `createPaymentLink`, `getPaymentLink`, `updatePaymentLink`, donation create/detail/update                                | `MakePayPaymentLinkResponse`                                                             | required `companyId`; normalized `paymentLink` plus retained `paymentLink.payload`                           |
+| `listPaymentLinks`                                                                                                       | `MakePayPaymentLinksResponse`                                                            | required `companyId`; `paymentLinks[]` uses the same canonical partner-v1 link shape                        |
+| `listDonationLinks`                                                                                                      | `MakePayDonationLinksResponse`                                                           | required `companyId`, `donations`                                                                           |
+| `sendPaymentRequestEmail`                                                                                                | `MakePayPaymentRequestEmailResponse`                                                     | `ok`, `email`, and the updated payment-link email payload                                                   |
+| `createAnonymousPaymentLink`                                                                                             | `MakePayAnonymousPaymentLinkResponse`                                                    | `anonymous`, `requestId`, public `paymentLink`, and optional one-time webhook secret                        |
 | `listCustomers`, `upsertCustomer`, `createCustomerPortal`                                                                | `MakePayCustomersResponse` or `MakePayCustomerResponse`                                  | `customers`, `customer`, `portalUrl` or `url`                                                               |
 | `listSubscriptions`, `createSubscription`                                                                                | `MakePaySubscriptionsResponse` or `MakePaySubscriptionResponse`                          | `subscriptions`, `subscription`                                                                             |
 | `listPosTerminals`, `createPosTerminal`, `getPosTerminal`, `updatePosTerminal`                                           | `MakePayPosTerminalsResponse` or `MakePayPosTerminalResponse`                            | `terminals`/`posTerminals`, `terminal`/`posTerminal`                                                        |
@@ -449,7 +557,7 @@ Model conventions:
 | `getShop`, `updateShop`, `getShopBuilder`, `updateShopBuilder`, `getShopDomain`, `updateShopDomain`, `refreshShopDomain` | shop, builder, and domain response types                                                 | `shop`, `blocks`, `builder`, `domain`, `status`, `verification`                                             |
 | `listShopCoupons`, `createShopCoupon`, `updateShopCoupon`, `archiveShopCoupon`, `listShopOrders`                         | coupon and order response types                                                          | `coupons`, `coupon`, `orders`                                                                               |
 | `getBranding`, `updateBranding`, `refreshBrandingDomains`, `getSettings`, `updateSettings`                               | `MakePayBrandingResponse`, `MakePaySettingsResponse`, or `MakePaySettingsUpdateResponse` | `company`, `settings`, `ok`                                                                                 |
-| `listDestinationAssets`, `listWebhookRequests`                                                                           | operational response types                                                               | `assets`/`destinationAssets`, `webhookRequests`/`requests`                                                  |
+| `listDestinationAssets`, `listWebhookRequests`, current webhook subscription methods                                     | operational response types                                                               | assets, webhook request logs, subscription metadata, and one-time `signingSecret`                           |
 | `getBookkeepingSummary`, invoice, expense, document, OCR, and reconciliation methods                                     | bookkeeping response types                                                               | `summary`, `invoices`, `invoice`, `expenses`, `expense`, `documents`, `url`, `reconciliationLinks`, `stats` |
 | `verifyMakePayWebhook`, `parseMakePayWebhook`                                                                            | boolean or parsed event                                                                  | `parseMakePayWebhook<T>()` returns your supplied event type after signature verification                    |
 
@@ -459,7 +567,11 @@ document, reconciliation, and stat views from a single response.
 
 ## Errors
 
-API calls throw `MakePayError` with `status` and `responseBody` fields.
+API calls throw `MakePayError` with a numeric HTTP `status`. Remote error
+bodies are intentionally not attached or reflected in the message, so the
+error is safe to pass through normal application logging boundaries. The
+deprecated `responseBody` property remains for source compatibility but is
+always `undefined`.
 
 ```ts
 import { MakePayError } from "@makecrypto/makepay";
@@ -468,7 +580,7 @@ try {
   await makepay.getPaymentLink("PAYMENT_LINK_UID");
 } catch (error) {
   if (error instanceof MakePayError) {
-    console.error(error.status, error.responseBody);
+    console.error(error.status, error.message);
   }
 }
 ```

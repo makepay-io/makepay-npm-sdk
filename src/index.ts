@@ -1,17 +1,104 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  createHmac,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  randomUUID,
+  sign,
+  timingSafeEqual,
+} from "node:crypto";
 
-export type MakePayClientOptions = {
+export type MakePayClientBaseOptions = {
+  /** Origin-only HTTPS URL; exact loopback hosts may use HTTP for local tests. */
   baseUrl?: string;
+  /** Origin-only HTTPS URL; exact loopback hosts may use HTTP for local tests. */
   checkoutBaseUrl?: string;
-  keyId: string;
-  keySecret: string;
   fetch?: typeof fetch;
 };
+
+export type MakePayApiKeyClientOptions = MakePayClientBaseOptions & {
+  keyId: string;
+  keySecret: string;
+  authProvider?: never;
+};
+
+export type MakePayOAuthClientOptions = MakePayClientBaseOptions & {
+  authProvider: MakePayAuthProvider;
+  keyId?: never;
+  keySecret?: never;
+};
+
+/**
+ * Configure the client with either a MakePay API key or an asynchronous OAuth
+ * provider. Authentication credentials are intentionally mutually exclusive.
+ */
+export type MakePayClientOptions =
+  | MakePayApiKeyClientOptions
+  | MakePayOAuthClientOptions;
+
+export type MakePayHttpMethod = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
+
+export type MakePayAuthRequest = Readonly<{
+  method: MakePayHttpMethod;
+  retry: boolean;
+  url: string;
+}>;
+
+export type MakePayAuthRefreshRequest = MakePayAuthRequest &
+  Readonly<{
+    response: Response;
+  }>;
+
+export type MakePayOAuthAuthorization = Readonly<{
+  accessToken: string;
+  tokenType?: "Bearer" | "DPoP";
+  dpopProof?: string;
+}>;
+
+/**
+ * Supplies current OAuth credentials for each request. The host owns token
+ * storage, refresh locking, and persistence of rotated refresh tokens.
+ */
+export interface MakePayAuthProvider {
+  getAuthorization(
+    request: MakePayAuthRequest,
+  ): Promise<MakePayOAuthAuthorization>;
+  refreshAuthorization?(request: MakePayAuthRefreshRequest): Promise<void>;
+}
+
+export type MakePayOAuthAuthProvider = MakePayAuthProvider;
+
+export type MakePayDpopPublicJwk = Readonly<{
+  crv: "P-256";
+  kty: "EC";
+  x: string;
+  y: string;
+}>;
+
+export type MakePayDpopKeyPair = Readonly<{
+  privateKeyPem: string;
+  publicJwk: MakePayDpopPublicJwk;
+  thumbprint: string;
+}>;
+
+export type MakePayDpopProofOptions = Readonly<{
+  accessToken?: string;
+  issuedAt?: number;
+  jti?: string;
+  method: string;
+  privateKey: string;
+  url: string;
+}>;
+
+const MAKEPAY_MODAL_SCRIPT_CDN_URL =
+  "https://cdn.makepay.io/modal/makepay.min.js";
 
 export type MakePayPaymentLinkPayload = {
   title?: string;
   description?: string;
   amount: string | number;
+  fiatCurrency?: string;
   currency?: string;
   asset?: string;
   orderId?: string;
@@ -300,25 +387,49 @@ export type MakePayCompanyReference = {
   [key: string]: unknown;
 };
 
-export type MakePayPaymentLink = {
-  id?: string;
-  uid?: string;
-  publicUrl?: string;
-  checkoutUrl?: string;
-  status?: string;
-  type?: string;
-  title?: string | null;
-  label?: string | null;
-  description?: string | null;
-  amount?: string | number | null;
-  amountUsd?: string | number | null;
-  currency?: string | null;
-  asset?: string | null;
-  orderId?: string | null;
-  clientId?: string | null;
-  customerEmail?: string | null;
-  donationSlug?: string | null;
+/** The original merchant payload retained by the partner-v1 serializer. */
+export type MakePayPaymentLinkResponsePayload = {
+  amount?: string | number;
+  fiatCurrency?: string;
   metadata?: Record<string, unknown>;
+  [key: string]: unknown;
+};
+
+/**
+ * Canonical authenticated partner-v1 payment-link shape. The API retains the
+ * original payload and also exposes normalized correlation fields at the link
+ * level for back-office consumers.
+ */
+export type MakePayPaymentLink = {
+  id: string;
+  uid: string;
+  publicUrl: string;
+  checkoutUrl?: string;
+  status: string;
+  type?: string;
+  donation_slug: string | null;
+  link_type: string | null;
+  source: string | null;
+  title: string | null;
+  label: string | null;
+  description: string | null;
+  amount: string | null;
+  fiatAmount: string | null;
+  fiatCurrency: string | null;
+  amountUsd?: string | number | null;
+  currency: string | null;
+  asset: string | null;
+  orderId: string | null;
+  clientId: string | null;
+  customerEmail: string | null;
+  donationSlug?: string | null;
+  metadata: Record<string, unknown>;
+  payload: MakePayPaymentLinkResponsePayload;
+  latestSession: Record<string, unknown> | null;
+  timelineEvents: unknown[];
+  created_at: string;
+  updated_at: string | null;
+  expires_at: string | null;
   createdAt?: string;
   updatedAt?: string;
   [key: string]: unknown;
@@ -326,7 +437,7 @@ export type MakePayPaymentLink = {
 
 export type MakePayPaymentLinkResponse = {
   ok?: boolean;
-  companyId?: string;
+  companyId: string;
   paymentLink: MakePayPaymentLink;
   paymentRequestEmailSent?: boolean;
   paymentRequestEmailError?: string | null;
@@ -334,8 +445,59 @@ export type MakePayPaymentLinkResponse = {
 };
 
 export type MakePayPaymentLinksResponse = {
-  companyId?: string;
+  companyId: string;
   paymentLinks: MakePayPaymentLink[];
+  [key: string]: unknown;
+};
+
+export type MakePayDonationLinksResponse = {
+  companyId: string;
+  donations: MakePayPaymentLink[];
+  [key: string]: unknown;
+};
+
+export type MakePayPaymentRequestEmailResponse = {
+  ok: boolean;
+  email: string;
+  paymentLink: {
+    id: string;
+    uid: string;
+    donation_slug: string | null;
+    link_type: string;
+    status: string;
+    payload: MakePayPaymentLinkResponsePayload;
+    publicUrl: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+};
+
+export type MakePayAnonymousPaymentLinkResponse = {
+  ok: boolean;
+  anonymous: true;
+  paymentRequestEmailSent: false;
+  paymentRequestEmailError: null;
+  paymentLink: {
+    id: string;
+    uid: string;
+    status: string;
+    link_type: "one_time";
+    payload: MakePayPaymentLinkResponsePayload;
+    settlement: Record<string, unknown>;
+    branding: Record<string, unknown>;
+    publicUrl: string;
+    expiresAt: string | null;
+    expires_at: string | null;
+    created_at: string;
+    updated_at: string;
+    webhook: {
+      url: string;
+      secret: string;
+      secretLast4: string;
+    } | null;
+    [key: string]: unknown;
+  };
+  requestId: string;
   [key: string]: unknown;
 };
 
@@ -398,6 +560,49 @@ export type MakePayDestinationAssetsResponse = {
 export type MakePayWebhookRequestsResponse = {
   webhookRequests?: Array<Record<string, unknown>>;
   requests?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+};
+
+export type MakePayWebhookSubscriptionEvent =
+  | "makepay.payment.*"
+  | `makepay.payment.${string}`;
+
+export type MakePayWebhookSubscriptionPayload = {
+  url: string;
+  events?: MakePayWebhookSubscriptionEvent[];
+  active?: boolean;
+  description?: string | null;
+  metadata?: Record<string, unknown>;
+  rotateSecret?: boolean;
+  [key: string]: unknown;
+};
+
+export type MakePayWebhookSubscription = {
+  id: string;
+  oauthGrantId: string;
+  companyId: string;
+  url: string;
+  events: MakePayWebhookSubscriptionEvent[];
+  active: boolean;
+  status: "active" | "disabled";
+  description: string | null;
+  metadata: Record<string, unknown>;
+  secretLast4: string | null;
+  secretCreatedAt: string | null;
+  secretUpdatedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  [key: string]: unknown;
+};
+
+export type MakePayWebhookSubscriptionResponse = {
+  companyId: string;
+  ok?: boolean;
+  created?: boolean;
+  rotated?: boolean;
+  subscription: MakePayWebhookSubscription | null;
+  /** Returned only when a subscription is created or its secret is rotated. */
+  signingSecret?: string;
   [key: string]: unknown;
 };
 
@@ -702,31 +907,65 @@ export type MakePayBookkeepingDocumentDownloadResponse = {
 };
 
 export type MakePayPublicRequestOptions = {
+  /** Origin-only HTTPS URL; exact loopback hosts may use HTTP for local tests. */
   baseUrl?: string;
   fetch?: typeof fetch;
 };
 
-export type CreatePaymentLinkOptions = {
+export type MakePayIdempotencyOptions = {
+  /** 8-200 URL-safe characters; reuse only for an identical mutation. */
+  idempotencyKey?: string;
+};
+
+export type MakePayRequiredIdempotencyOptions = {
+  /** 8-200 URL-safe characters; reuse only for an identical mutation. */
+  idempotencyKey: string;
+};
+
+export type CreatePaymentLinkOptions = MakePayIdempotencyOptions & {
   status?: "active" | "paused" | "archived";
   sendPaymentRequestEmail?: boolean;
 };
+
+export type CreateDonationLinkOptions = Omit<
+  CreatePaymentLinkOptions,
+  "idempotencyKey"
+>;
 
 export type PaymentLinkStatusUpdate = {
   status: "active" | "paused" | "archived";
 };
 
-export type MakePayRequestOptions = {
+export type MakePayMedusaCorrelationMetadata = {
+  medusaOrderId?: string;
+  medusaOrderDisplayId?: string;
+  medusaAdminUrl?: string;
+  medusaInstallationId?: string;
+};
+
+export type MakePayPaymentLinkUpdate = {
+  status?: PaymentLinkStatusUpdate["status"];
+  extendExpirationTime?: "15m" | "1h" | "12h" | "24h" | "72h" | "never";
+  invoicePdfUrl?: string;
+  skipQuoteAcceptance?: boolean;
+  metadata?: MakePayMedusaCorrelationMetadata;
+};
+
+export type MakePayRequestOptions = MakePayIdempotencyOptions & {
   query?: Record<string, string | number | boolean | null | undefined>;
 };
 
 export type MakePayWebhookVerificationOptions = {
+  /** Finite positive freshness window in seconds. Defaults to 300. */
   toleranceSeconds?: number;
 };
 
 export type MakePayEmbedViewType = "full" | "minimal";
 
 export type MakePayCheckoutUrlOptions = {
+  /** Origin-only HTTPS URL; exact loopback hosts may use HTTP for local tests. */
   baseUrl?: string;
+  /** Embedding merchant origin; follows the same HTTPS/loopback policy. */
   parentOrigin?: string;
   viewType?: MakePayEmbedViewType;
 };
@@ -772,6 +1011,7 @@ type MakePayBrowserWindow = Window & {
 
 export class MakePayError extends Error {
   readonly status: number;
+  /** @deprecated Remote response bodies are intentionally never retained. */
   readonly responseBody: unknown;
 
   constructor(
@@ -781,38 +1021,48 @@ export class MakePayError extends Error {
     super(message);
     this.name = "MakePayError";
     this.status = options.status ?? 0;
-    this.responseBody = options.responseBody;
+    // Keep the pre-0.4 public shape without retaining untrusted response data.
+    this.responseBody = undefined;
   }
 }
 
 export class MakePayClient {
   static readonly defaultBaseUrl = "https://www.makecrypto.io";
-  static readonly defaultCheckoutBaseUrl = "https://makepay.io";
-  static readonly version = "0.3.2";
+  static readonly defaultCheckoutBaseUrl = "https://www.makepay.io";
+  static readonly version = "0.4.0";
 
   private readonly baseUrl: string;
+  private readonly baseOrigin: string;
   private readonly checkoutBaseUrl: string;
-  private readonly keyId: string;
-  private readonly keySecret: string;
+  private readonly keyId?: string;
+  private readonly keySecret?: string;
+  private readonly authProvider?: MakePayAuthProvider;
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: MakePayClientOptions) {
-    this.baseUrl = (options.baseUrl ?? MakePayClient.defaultBaseUrl).replace(
-      /\/+$/,
-      "",
+    const parsedBaseUrl = parseMakePayApiBaseUrl(
+      options.baseUrl ?? MakePayClient.defaultBaseUrl,
     );
-    this.checkoutBaseUrl = (
-      options.checkoutBaseUrl ?? MakePayClient.defaultCheckoutBaseUrl
-    ).replace(/\/+$/, "");
+    const parsedCheckoutBaseUrl = parseMakePayCheckoutBaseUrl(
+      options.checkoutBaseUrl ?? MakePayClient.defaultCheckoutBaseUrl,
+    );
+    this.baseUrl = parsedBaseUrl.origin;
+    this.baseOrigin = parsedBaseUrl.origin;
+    this.checkoutBaseUrl = parsedCheckoutBaseUrl.origin;
     this.keyId = options.keyId;
     this.keySecret = options.keySecret;
+    this.authProvider = options.authProvider;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
 
     if (!this.fetchImpl) {
       throw new MakePayError("A fetch implementation is required.");
     }
-    if (!this.keyId || !this.keySecret) {
-      throw new MakePayError("MakePay keyId and keySecret are required.");
+    const hasApiKey = Boolean(this.keyId && this.keySecret);
+    const hasOAuthProvider = Boolean(this.authProvider);
+    if (hasApiKey === hasOAuthProvider) {
+      throw new MakePayError(
+        "Configure either MakePay keyId/keySecret or authProvider.",
+      );
     }
   }
 
@@ -820,11 +1070,16 @@ export class MakePayClient {
     payload: MakePayPaymentLinkPayload,
     options: CreatePaymentLinkOptions = {},
   ): Promise<MakePayPaymentLinkResponse> {
-    return this.request("POST", "/api/partner/v1/makepay/payment-links", {
-      status: options.status ?? "active",
-      sendPaymentRequestEmail: options.sendPaymentRequestEmail ?? false,
-      payload,
-    });
+    return this.request(
+      "POST",
+      "/api/partner/v1/makepay/payment-links",
+      {
+        status: options.status ?? "active",
+        sendPaymentRequestEmail: options.sendPaymentRequestEmail ?? false,
+        payload,
+      },
+      { idempotencyKey: options.idempotencyKey },
+    );
   }
 
   listPaymentLinks(
@@ -851,7 +1106,8 @@ export class MakePayClient {
 
   updatePaymentLink(
     uid: string,
-    updates: PaymentLinkStatusUpdate,
+    updates: MakePayPaymentLinkUpdate,
+    options: MakePayIdempotencyOptions = {},
   ): Promise<MakePayPaymentLinkResponse> {
     assertNonEmpty(uid, "Payment link UID is required.");
 
@@ -859,13 +1115,14 @@ export class MakePayClient {
       "PATCH",
       `/api/partner/v1/makepay/payment-links/${encodeURIComponent(uid)}`,
       updates,
+      options,
     );
   }
 
   sendPaymentRequestEmail(
     uid: string,
     email?: string,
-  ): Promise<MakePayPaymentLinkResponse> {
+  ): Promise<MakePayPaymentRequestEmailResponse> {
     assertNonEmpty(uid, "Payment link UID is required.");
 
     return this.request(
@@ -877,19 +1134,23 @@ export class MakePayClient {
 
   createDonationLink(
     payload: MakePayDonationLinkPayload,
-    options: CreatePaymentLinkOptions = {},
+    options: CreateDonationLinkOptions = {},
   ): Promise<MakePayPaymentLinkResponse> {
-    return this.request("POST", "/api/partner/v1/makepay/donations", {
-      status: options.status ?? "active",
-      sendPaymentRequestEmail: options.sendPaymentRequestEmail ?? false,
-      payload: {
-        ...payload,
-        type: "donation",
+    return this.request(
+      "POST",
+      "/api/partner/v1/makepay/donations",
+      {
+        status: options.status ?? "active",
+        sendPaymentRequestEmail: options.sendPaymentRequestEmail ?? false,
+        payload: {
+          ...payload,
+          type: "donation",
+        },
       },
-    });
+    );
   }
 
-  listDonationLinks(): Promise<MakePayPaymentLinksResponse> {
+  listDonationLinks(): Promise<MakePayDonationLinksResponse> {
     return this.request("GET", "/api/partner/v1/makepay/donations");
   }
 
@@ -966,6 +1227,38 @@ export class MakePayClient {
       {
         query,
       },
+    );
+  }
+
+  getCurrentWebhookSubscription(): Promise<MakePayWebhookSubscriptionResponse> {
+    return this.request(
+      "GET",
+      "/api/partner/v1/makepay/webhook-subscriptions/current",
+    );
+  }
+
+  upsertCurrentWebhookSubscription(
+    payload: MakePayWebhookSubscriptionPayload,
+    options: MakePayRequiredIdempotencyOptions,
+  ): Promise<MakePayWebhookSubscriptionResponse> {
+    assertNonEmpty(payload.url, "Webhook subscription URL is required.");
+
+    return this.request(
+      "PUT",
+      "/api/partner/v1/makepay/webhook-subscriptions/current",
+      payload,
+      options,
+    );
+  }
+
+  deleteCurrentWebhookSubscription(
+    options: MakePayRequiredIdempotencyOptions,
+  ): Promise<MakePayWebhookSubscriptionResponse> {
+    return this.request(
+      "DELETE",
+      "/api/partner/v1/makepay/webhook-subscriptions/current",
+      undefined,
+      options,
     );
   }
 
@@ -1409,36 +1702,27 @@ export class MakePayClient {
   }
 
   async request(
-    method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
+    method: MakePayHttpMethod,
     path: string,
     body?: unknown,
     options: MakePayRequestOptions = {},
   ): Promise<any> {
-    const url = new URL(`${this.baseUrl}${path}`);
+    const url = this.buildApiUrl(path);
     for (const [key, value] of Object.entries(options.query ?? {})) {
       if (value !== null && value !== undefined) {
         url.searchParams.set(key, String(value));
       }
     }
 
-    const headers = new Headers({
-      accept: "application/json",
-      "user-agent": `MakePayJS/${MakePayClient.version}`,
-      "x-makecrypto-key-id": this.keyId,
-      "x-makecrypto-key-secret": this.keySecret,
-    });
-
-    const init: RequestInit = {
-      headers,
+    const requestBody =
+      body !== undefined && method !== "GET" ? JSON.stringify(body) : undefined;
+    const response = await this.authenticatedFetch(
       method,
-    };
-
-    if (body !== undefined && method !== "GET") {
-      headers.set("content-type", "application/json");
-      init.body = JSON.stringify(body);
-    }
-
-    const response = await this.fetchImpl(url, init);
+      url,
+      requestBody,
+      requestBody === undefined ? undefined : "application/json",
+      options,
+    );
     return decodeMakePayResponse(response);
   }
 
@@ -1448,42 +1732,158 @@ export class MakePayClient {
     body: FormData,
     options: MakePayRequestOptions = {},
   ): Promise<any> {
-    const url = new URL(`${this.baseUrl}${path}`);
+    const url = this.buildApiUrl(path);
     for (const [key, value] of Object.entries(options.query ?? {})) {
       if (value !== null && value !== undefined) {
         url.searchParams.set(key, String(value));
       }
     }
 
-    const headers = new Headers({
-      accept: "application/json",
-      "user-agent": `MakePayJS/${MakePayClient.version}`,
-      "x-makecrypto-key-id": this.keyId,
-      "x-makecrypto-key-secret": this.keySecret,
-    });
-
-    const response = await this.fetchImpl(url, {
-      body,
-      headers,
+    const response = await this.authenticatedFetch(
       method,
-    });
+      url,
+      body,
+      undefined,
+      options,
+    );
 
     return decodeMakePayResponse(response);
+  }
+
+  private buildApiUrl(path: string): URL {
+    if (!path.startsWith("/")) {
+      throw new MakePayError("MakePay API path must start with '/'.");
+    }
+
+    const url = new URL(`${this.baseUrl}${path}`);
+    if (
+      url.origin !== this.baseOrigin ||
+      Boolean(url.username) ||
+      Boolean(url.password)
+    ) {
+      throw new MakePayError("MakePay API path must remain on the base origin.");
+    }
+
+    return url;
+  }
+
+  private async authenticatedFetch(
+    method: MakePayHttpMethod,
+    url: URL,
+    body: BodyInit | undefined,
+    contentType: string | undefined,
+    options: MakePayRequestOptions,
+  ): Promise<Response> {
+    const idempotencyKey = options.idempotencyKey?.trim();
+    if (
+      options.idempotencyKey !== undefined &&
+      (!idempotencyKey || !MAKEPAY_IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey))
+    ) {
+      throw new MakePayError(
+        "Idempotency key must contain 8 to 200 URL-safe characters.",
+        { status: 400 },
+      );
+    }
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const retry = attempt === 1;
+      const requestContext: MakePayAuthRequest = {
+        method,
+        retry,
+        url: url.toString(),
+      };
+      const headers = new Headers({
+        accept: "application/json",
+        "user-agent": `MakePayJS/${MakePayClient.version}`,
+      });
+
+      if (contentType) {
+        headers.set("content-type", contentType);
+      }
+      if (idempotencyKey) {
+        headers.set("idempotency-key", idempotencyKey);
+      }
+
+      if (this.authProvider) {
+        let authorization: MakePayOAuthAuthorization;
+        try {
+          authorization =
+            await this.authProvider.getAuthorization(requestContext);
+        } catch {
+          throw new MakePayError("MakePay OAuth authorization failed.");
+        }
+        const accessToken = authorization.accessToken?.trim();
+        if (!accessToken) {
+          throw new MakePayError(
+            "OAuth authProvider returned an empty access token.",
+          );
+        }
+
+        const tokenType = authorization.tokenType ?? "Bearer";
+        if (tokenType === "DPoP" && !authorization.dpopProof?.trim()) {
+          throw new MakePayError(
+            "OAuth authProvider must return a DPoP proof for DPoP tokens.",
+          );
+        }
+
+        headers.set("authorization", `${tokenType} ${accessToken}`);
+        if (authorization.dpopProof) {
+          headers.set("dpop", authorization.dpopProof);
+        }
+      } else {
+        headers.set("x-makecrypto-key-id", this.keyId!);
+        headers.set("x-makecrypto-key-secret", this.keySecret!);
+      }
+
+      const response = await this.fetchImpl(url, {
+        body,
+        headers,
+        method,
+        // Custom API-key and DPoP headers are not guaranteed to be stripped
+        // by every fetch implementation when following a cross-origin redirect.
+        redirect: "manual",
+      });
+
+      if (
+        response.status === 401 &&
+        attempt === 0 &&
+        this.authProvider?.refreshAuthorization
+      ) {
+        try {
+          await this.authProvider.refreshAuthorization({
+            ...requestContext,
+            response: sanitizeOAuthRefreshResponse(response),
+          });
+        } catch {
+          throw new MakePayError("MakePay OAuth refresh failed.", {
+            status: response.status,
+          });
+        }
+        continue;
+      }
+
+      return response;
+    }
+
+    throw new MakePayError("MakePay authentication retry failed.");
   }
 }
 
 export async function createAnonymousPaymentLink(
   payload: MakePayAnonymousPaymentLinkPayload,
   options: MakePayPublicRequestOptions = {},
-): Promise<MakePayPaymentLinkResponse> {
+): Promise<MakePayAnonymousPaymentLinkResponse> {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   if (!fetchImpl) {
     throw new MakePayError("A fetch implementation is required.");
   }
 
+  const baseUrl = parseMakePayApiBaseUrl(
+    options.baseUrl ?? MakePayClient.defaultBaseUrl,
+  );
   const url = new URL(
     "/api/partner/v1/makepay/payment-links",
-    `${normalizeBaseUrl(options.baseUrl ?? MakePayClient.defaultBaseUrl)}/`,
+    `${baseUrl.origin}/`,
   );
   const headers = new Headers({
     accept: "application/json",
@@ -1493,12 +1893,108 @@ export async function createAnonymousPaymentLink(
     body: JSON.stringify(payload),
     headers,
     method: "POST",
+    redirect: "manual",
   });
 
-  return decodeMakePayResponse(response) as Promise<MakePayPaymentLinkResponse>;
+  return decodeMakePayResponse(
+    response,
+  ) as Promise<MakePayAnonymousPaymentLinkResponse>;
 }
 
 export const createAnonymousMakePayPaymentLink = createAnonymousPaymentLink;
+
+/** Generate a P-256 key pair suitable for MakeCrypto native OAuth DPoP. */
+export function generateMakePayDpopKeyPair(): MakePayDpopKeyPair {
+  const { privateKey, publicKey } = generateKeyPairSync("ec", {
+    namedCurve: "P-256",
+  });
+  const publicJwk = normalizeMakePayDpopPublicJwk(
+    publicKey.export({ format: "jwk" }),
+  );
+
+  return {
+    privateKeyPem: privateKey
+      .export({ format: "pem", type: "pkcs8" })
+      .toString(),
+    publicJwk,
+    thumbprint: calculateMakePayDpopJwkThumbprint(publicJwk),
+  };
+}
+
+/** Calculate the RFC 7638 SHA-256 thumbprint used as the DPoP `jkt`. */
+export function calculateMakePayDpopJwkThumbprint(
+  publicJwk: MakePayDpopPublicJwk,
+): string {
+  const jwk = normalizeMakePayDpopPublicJwk(publicJwk);
+  const canonicalJwk = JSON.stringify({
+    crv: jwk.crv,
+    kty: jwk.kty,
+    x: jwk.x,
+    y: jwk.y,
+  });
+
+  return createHash("sha256").update(canonicalJwk).digest("base64url");
+}
+
+/** Create a fresh ES256 DPoP proof for an API or OAuth token request. */
+export function createMakePayDpopProof(
+  options: MakePayDpopProofOptions,
+): string {
+  const method = options.method.trim().toUpperCase();
+  assertNonEmpty(method, "DPoP HTTP method is required.");
+  assertNonEmpty(options.privateKey, "DPoP private key is required.");
+
+  let url: URL;
+  try {
+    url = new URL(options.url);
+  } catch {
+    throw new MakePayError("DPoP URL must be an absolute URL.");
+  }
+  if (!isMakePaySecureTransportUrl(options.url, url)) {
+    throw new MakePayError(
+      "DPoP URL must be an HTTPS URL without embedded credentials; HTTP is allowed only for exact loopback hosts localhost, 127.0.0.1, or [::1].",
+    );
+  }
+  // RFC 9449 section 4.2 defines `htu` without query and fragment parts.
+  url.search = "";
+  url.hash = "";
+
+  let privateKey: ReturnType<typeof createPrivateKey>;
+  let publicJwk: MakePayDpopPublicJwk;
+  try {
+    privateKey = createPrivateKey(options.privateKey);
+    publicJwk = normalizeMakePayDpopPublicJwk(
+      createPublicKey(privateKey).export({ format: "jwk" }),
+    );
+  } catch {
+    throw new MakePayError("Invalid P-256 DPoP private key.");
+  }
+
+  const header = {
+    typ: "dpop+jwt",
+    alg: "ES256",
+    jwk: publicJwk,
+  };
+  const payload: Record<string, string | number> = {
+    htu: url.toString(),
+    htm: method,
+    iat: options.issuedAt ?? Math.floor(Date.now() / 1000),
+    jti: options.jti ?? randomUUID(),
+  };
+  if (options.accessToken) {
+    payload.ath = createHash("sha256")
+      .update(options.accessToken)
+      .digest("base64url");
+  }
+
+  const signingInput = `${encodeBase64UrlJson(header)}.${encodeBase64UrlJson(payload)}`;
+  const signature = sign("sha256", Buffer.from(signingInput), {
+    dsaEncoding: "ieee-p1363",
+    key: privateKey,
+  });
+
+  return `${signingInput}.${signature.toString("base64url")}`;
+}
 
 export function buildMakePayHostedCheckoutUrl(
   paymentUid: string,
@@ -1506,9 +2002,12 @@ export function buildMakePayHostedCheckoutUrl(
 ): string {
   assertNonEmpty(paymentUid, "Payment link UID is required.");
 
+  const baseUrl = parseMakePayCheckoutBaseUrl(
+    options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl,
+  );
   return new URL(
     `/payment/${encodeURIComponent(paymentUid)}`,
-    `${normalizeBaseUrl(options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl)}/`,
+    `${baseUrl.origin}/`,
   ).toString();
 }
 
@@ -1518,9 +2017,12 @@ export function buildMakePayHostedDonationUrl(
 ): string {
   assertNonEmpty(donationSlug, "Donation slug is required.");
 
+  const baseUrl = parseMakePayCheckoutBaseUrl(
+    options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl,
+  );
   return new URL(
     `/donations/${encodeURIComponent(donationSlug)}`,
-    `${normalizeBaseUrl(options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl)}/`,
+    `${baseUrl.origin}/`,
   ).toString();
 }
 
@@ -1530,13 +2032,19 @@ export function buildMakePayEmbeddedCheckoutUrl(
 ): string {
   assertNonEmpty(paymentUid, "Payment link UID is required.");
 
+  const baseUrl = parseMakePayCheckoutBaseUrl(
+    options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl,
+  );
   const url = new URL(
     `/embed/payment/${encodeURIComponent(paymentUid)}`,
-    `${normalizeBaseUrl(options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl)}/`,
+    `${baseUrl.origin}/`,
   );
 
-  if (options.parentOrigin) {
-    url.searchParams.set("parentOrigin", options.parentOrigin);
+  if (options.parentOrigin !== undefined) {
+    url.searchParams.set(
+      "parentOrigin",
+      parseMakePayParentOrigin(options.parentOrigin).origin,
+    );
   }
   appendMakePayEmbedViewType(url, options.viewType);
 
@@ -1549,13 +2057,19 @@ export function buildMakePayEmbeddedDonationUrl(
 ): string {
   assertNonEmpty(donationSlug, "Donation slug is required.");
 
+  const baseUrl = parseMakePayCheckoutBaseUrl(
+    options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl,
+  );
   const url = new URL(
     `/embed/donations/${encodeURIComponent(donationSlug)}`,
-    `${normalizeBaseUrl(options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl)}/`,
+    `${baseUrl.origin}/`,
   );
 
-  if (options.parentOrigin) {
-    url.searchParams.set("parentOrigin", options.parentOrigin);
+  if (options.parentOrigin !== undefined) {
+    url.searchParams.set(
+      "parentOrigin",
+      parseMakePayParentOrigin(options.parentOrigin).origin,
+    );
   }
   appendMakePayEmbedViewType(url, options.viewType);
 
@@ -1565,10 +2079,18 @@ export function buildMakePayEmbeddedDonationUrl(
 export function buildMakePayModalScriptUrl(
   options: Pick<MakePayCheckoutUrlOptions, "baseUrl"> = {},
 ): string {
-  return new URL(
-    "/modal/makepay.js",
-    `${normalizeBaseUrl(options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl)}/`,
-  ).toString();
+  const baseUrl = parseMakePayCheckoutBaseUrl(
+    options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl,
+  );
+
+  if (
+    baseUrl.origin === MakePayClient.defaultCheckoutBaseUrl ||
+    baseUrl.origin === "https://makepay.io"
+  ) {
+    return MAKEPAY_MODAL_SCRIPT_CDN_URL;
+  }
+
+  return new URL("/modal/makepay.min.js", `${baseUrl.origin}/`).toString();
 }
 
 export function buildMakePayEmbedButtonHtml(
@@ -1677,15 +2199,20 @@ export async function openMakePayCheckout(
 export function mountMakePayCheckout(
   options: MountMakePayCheckoutOptions,
 ): MountedMakePayCheckout {
+  const parentOrigin = options.parentOrigin ?? globalThis.location?.origin;
+  const normalizedParentOrigin =
+    parentOrigin === undefined
+      ? undefined
+      : parseMakePayParentOrigin(parentOrigin).origin;
   const container = resolveContainer(options.container);
-  const allowedOrigin = new URL(
-    normalizeBaseUrl(options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl),
+  const allowedOrigin = parseMakePayCheckoutBaseUrl(
+    options.baseUrl ?? MakePayClient.defaultCheckoutBaseUrl,
   ).origin;
   const iframe = document.createElement("iframe");
   iframe.title = options.iframeTitle ?? "MakePay checkout";
   iframe.src = buildMakePayEmbeddedCheckoutUrl(options.paymentUid, {
     baseUrl: options.baseUrl,
-    parentOrigin: options.parentOrigin ?? globalThis.location?.origin,
+    parentOrigin: normalizedParentOrigin,
     viewType: options.viewType,
   });
   iframe.style.width = "100%";
@@ -1697,6 +2224,8 @@ export function mountMakePayCheckout(
   const handleMessage = (event: MessageEvent<MakePayCheckoutEvent>) => {
     if (
       event.origin !== allowedOrigin ||
+      !iframe.contentWindow ||
+      event.source !== iframe.contentWindow ||
       !event.data ||
       typeof event.data.type !== "string"
     ) {
@@ -1741,7 +2270,8 @@ export function verifyMakePayWebhook(
 
   const toleranceSeconds = options.toleranceSeconds ?? 300;
   if (
-    toleranceSeconds > 0 &&
+    !Number.isFinite(toleranceSeconds) ||
+    toleranceSeconds <= 0 ||
     Math.abs(Math.floor(Date.now() / 1000) - timestamp) > toleranceSeconds
   ) {
     return false;
@@ -1810,21 +2340,18 @@ async function decodeMakePayResponse(
   const decoded = text ? safeJsonParse(text) : {};
 
   if (!response.ok) {
-    throw new MakePayError(readErrorMessage(decoded, response.status), {
-      responseBody: decoded,
-      status: response.status,
-    });
+    // Remote error text is untrusted and can contain reflected credentials,
+    // customer data, or request diagnostics. Keep SDK errors safe to log by
+    // exposing only the HTTP status and a stable local message.
+    throw new MakePayError(
+      `MakePay API request failed with HTTP ${response.status}.`,
+      {
+        status: response.status,
+      },
+    );
   }
 
   return isRecord(decoded) ? decoded : {};
-}
-
-function readErrorMessage(decoded: unknown, status: number): string {
-  if (isRecord(decoded) && typeof decoded.error === "string") {
-    return decoded.error;
-  }
-
-  return `MakePay API request failed with HTTP ${status}.`;
 }
 
 function assertNonEmpty(value: string, message: string): void {
@@ -1833,8 +2360,104 @@ function assertNonEmpty(value: string, message: string): void {
   }
 }
 
-function normalizeBaseUrl(baseUrl: string): string {
-  return baseUrl.replace(/\/+$/, "");
+const MAKEPAY_IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._~:+\/=\-]{8,200}$/;
+const MAKEPAY_DPOP_NONCE_PATTERN = /^[A-Za-z0-9._~\-]{1,512}$/;
+const MAKEPAY_NETWORK_ORIGIN_PATTERN =
+  /^([a-z][a-z\d+.-]*):\/\/(\[[^\]]+\]|[^:/?#]+)(?::[0-9]+)?\/?$/i;
+const MAKEPAY_URL_AUTHORITY_PATTERN =
+  /^[a-z][a-z\d+.-]*:\/\/(\[[^\]]+\]|[^:/?#@]+)(?::[0-9]+)?(?=\/|[?#]|$)/i;
+const MAKEPAY_HTTP_LOOPBACK_HOSTS = new Set([
+  "127.0.0.1",
+  "localhost",
+  "[::1]",
+]);
+
+function sanitizeOAuthRefreshResponse(response: Response): Response {
+  const headers = new Headers();
+  const nonce = response.headers.get("dpop-nonce")?.trim();
+  if (nonce && MAKEPAY_DPOP_NONCE_PATTERN.test(nonce)) {
+    headers.set("dpop-nonce", nonce);
+  }
+  return new Response(null, { headers, status: response.status });
+}
+
+function parseMakePayApiBaseUrl(value: string): URL {
+  return parseMakePayNetworkOrigin(value, "MakePay baseUrl");
+}
+
+function parseMakePayCheckoutBaseUrl(value: string): URL {
+  return parseMakePayNetworkOrigin(value, "MakePay checkout baseUrl");
+}
+
+function parseMakePayParentOrigin(value: string): URL {
+  return parseMakePayNetworkOrigin(value, "MakePay parentOrigin");
+}
+
+function parseMakePayNetworkOrigin(value: string, label: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw invalidMakePayNetworkOrigin(label);
+  }
+
+  if (
+    !MAKEPAY_NETWORK_ORIGIN_PATTERN.test(value) ||
+    !isMakePaySecureTransportUrl(value, url) ||
+    url.pathname !== "/" ||
+    url.search ||
+    url.hash
+  ) {
+    throw invalidMakePayNetworkOrigin(label);
+  }
+
+  return url;
+}
+
+function isMakePaySecureTransportUrl(value: string, url: URL): boolean {
+  const rawHostname =
+    MAKEPAY_URL_AUTHORITY_PATTERN.exec(value)?.[1]?.toLowerCase();
+  return Boolean(
+    rawHostname &&
+      !/\s/.test(value) &&
+      (url.protocol === "https:" ||
+        (url.protocol === "http:" &&
+          MAKEPAY_HTTP_LOOPBACK_HOSTS.has(rawHostname))) &&
+      !url.username &&
+      !url.password,
+  );
+}
+
+function invalidMakePayNetworkOrigin(label: string): MakePayError {
+  return new MakePayError(
+    `${label} must be an HTTPS origin without credentials, path, query, or fragment; HTTP is allowed only for exact loopback hosts localhost, 127.0.0.1, or [::1].`,
+  );
+}
+
+function normalizeMakePayDpopPublicJwk(
+  value: JsonWebKey | MakePayDpopPublicJwk,
+): MakePayDpopPublicJwk {
+  if (
+    value.kty !== "EC" ||
+    value.crv !== "P-256" ||
+    typeof value.x !== "string" ||
+    !value.x ||
+    typeof value.y !== "string" ||
+    !value.y
+  ) {
+    throw new MakePayError("DPoP key must be an EC P-256 key.");
+  }
+
+  return {
+    crv: "P-256",
+    kty: "EC",
+    x: value.x,
+    y: value.y,
+  };
+}
+
+function encodeBase64UrlJson(value: unknown): string {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
 }
 
 function normalizeMakePayEmbedViewType(
